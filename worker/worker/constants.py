@@ -29,3 +29,6 @@ CONFIG_FILENAMES = (
 # tags/branches the worker ls-remotes.
 SYNC_VERSIONS_TASK_NAME = "readthedocs.builds.tasks.sync_versions_task"
 SYNC_VERSIONS_TASK_QUEUE = "web"
+
+# Seconds. Bounds the GitHub call that revokes a build's clone token.
+REVOKE_CLONE_TOKEN_TIMEOUT_SECONDS = 10
