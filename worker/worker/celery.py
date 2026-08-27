@@ -28,6 +28,8 @@ Ephemeral worker semantics:
 """
 
 import os
+import ssl
+from urllib.parse import urlparse
 
 from celery import Celery
 from celery.signals import setup_logging
@@ -53,7 +55,15 @@ def _setup_logging(**kwargs):
 
 app = Celery("readthedocs-builder-worker")
 
-app.conf.broker_url = os.environ["RTD_BROKER_URL"]
+broker_url = os.environ["RTD_BROKER_URL"]
+app.conf.broker_url = broker_url
+
+# Configure SSL for rediss:// URLs (prod), but not for redis:// URLs (dev).
+if urlparse(broker_url).scheme == "rediss":
+    app.conf.broker_use_ssl = {
+        "ssl_cert_reqs": ssl.CERT_NONE,
+        "ssl_check_hostname": False,
+    }
 
 # The result backend is *not* configured: we don't need to store results.
 app.conf.task_ignore_result = True
