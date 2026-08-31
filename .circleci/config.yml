@@ -1,0 +1,84 @@
+# CI pipeline for readthedocs-builder.
+#
+# Caching: keys are immutable in CircleCI — bump "v1" in a key name to
+# invalidate it.
+version: 2.1
+
+commands:
+  setup-checkout:
+    description: Checkout code and initialize the common submodule
+    steps:
+      - checkout
+      # ``common`` carries the shared lint config that .pre-commit-config.yaml
+      # and .ruff.toml symlink into, and the vale styles .vale.ini points at —
+      # without it those are dangling and pre-commit can't run.
+      - run: git submodule sync
+      - run: git submodule update --init
+
+jobs:
+  checks:
+    docker:
+      - image: 'cimg/python:3.14'
+    steps:
+      - setup-checkout
+      # Recipe: https://pre-commit.com/#managing-ci-caches
+      - run:
+          name: Combine pre-commit config and python version for caching
+          command: |
+            cp common/pre-commit-config.yaml pre-commit-cache-key.txt
+            python --version --version >> pre-commit-cache-key.txt
+      - restore_cache:
+          keys:
+            - pre-commit-cache-{{ checksum "pre-commit-cache-key.txt" }}
+      - run: uv run --with tox --with tox-uv tox -e pre-commit
+      - save_cache:
+          key: pre-commit-cache-{{ checksum "pre-commit-cache-key.txt" }}
+          paths:
+            - ~/.cache/pre-commit
+
+  test-builder:
+    docker:
+      # Match the interpreter the AMI builds the venv against.
+      - image: 'cimg/python:3.14'
+    steps:
+      - setup-checkout
+      - restore_cache:
+          keys:
+            - tox-builder-v1-{{ checksum "uv.lock" }}
+      # tox-uv is required, not a convenience: this repo is a uv workspace, so
+      # tox installs from the root uv.lock and CI tests the pinned set.
+      - run: uv run --with tox --with tox-uv tox -e builder
+      - save_cache:
+          key: tox-builder-v1-{{ checksum "uv.lock" }}
+          paths:
+            - ~/.local/lib
+            - ~/.local/bin
+            - .tox
+
+  test-worker:
+    docker:
+      # Match the interpreter the AMI builds the venv against.
+      - image: 'cimg/python:3.14'
+    steps:
+      - setup-checkout
+      - restore_cache:
+          keys:
+            - tox-worker-v1-{{ checksum "uv.lock" }}
+      # tox-uv is required, not a convenience: this repo is a uv workspace and
+      # ``worker`` depends on ``builder`` via ``{ workspace = true }``, which
+      # pip cannot resolve. It also makes tox install from the root uv.lock, so
+      # CI tests the pinned dependency set.
+      - run: uv run --with tox --with tox-uv tox -e worker
+      - save_cache:
+          key: tox-worker-v1-{{ checksum "uv.lock" }}
+          paths:
+            - ~/.local/lib
+            - ~/.local/bin
+            - .tox
+
+workflows:
+  test:
+    jobs:
+      - checks
+      - test-builder
+      - test-worker

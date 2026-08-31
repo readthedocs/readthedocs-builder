@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+venv/
+.env
+.envrc
+
+*.egg-info/
+build/
+dist/
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+.idea/
+.vscode/
+*.swp
+
+# Populated by the readthedocs.org build-isolated dev service (uv
+# sync into these host dirs, then bind-mounted into build containers).
+/runner-venv/
+/uv-python/
+# Same idea: the dev entrypoint copies the image's rclone here so the host
+# daemon can bind-mount it into build containers.
+/rclone/
+
+# tox
+.tox/
