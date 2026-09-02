@@ -16,6 +16,7 @@ The director itself stays focused on doing-the-build; the runner owns
 import os
 import shutil
 import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -480,6 +481,7 @@ class Runner:
             log.info(
                 "Uploading artifact.", media_type=media_type, from_path=from_path, to_path=to_path
             )
+            self._log_directory_size(from_path, media_type)
             try:
                 build_media_storage.rclone_sync_directory(from_path, to_path)
             except BuildCancelled, BuildAppError, BuildUserError:
@@ -508,3 +510,27 @@ class Runner:
                     media_type=media_type,
                     media_path=media_path,
                 )
+
+    def _log_directory_size(self, directory, media_type):
+        """
+        Log the size of an artifact directory before uploading it.
+
+        Ported from ``UpdateDocsTask._log_directory_size``, keeping the same
+        log message and keys so existing dashboards cover both builders.
+        Purely informational: any failure is swallowed.
+        """
+        try:
+            output = subprocess.check_output(["du", "--summarize", "-m", "--", directory])
+            # The output is something like: "5\t/path/to/directory".
+            directory_size = int(output.decode().split()[0])
+            log.info(
+                "Build artifacts directory size.",
+                directory=directory,
+                size=directory_size,  # Size in mega bytes
+                media_type=media_type,
+            )
+        except Exception:
+            log.info(
+                "Error getting build artifacts directory size.",
+                exc_info=True,
+            )
