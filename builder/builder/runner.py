@@ -514,10 +514,6 @@ class Runner:
     def _log_directory_size(self, directory, media_type):
         """
         Log the size of an artifact directory before uploading it.
-
-        Ported from ``UpdateDocsTask._log_directory_size``, keeping the same
-        log message and keys so existing dashboards cover both builders.
-        Purely informational: any failure is swallowed.
         """
         try:
             output = subprocess.check_output(["du", "--summarize", "-m", "--", directory])
