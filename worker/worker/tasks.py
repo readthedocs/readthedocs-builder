@@ -26,6 +26,7 @@ import socket
 import subprocess
 import tempfile
 
+import requests
 import structlog
 from builder.api_client import get_build
 from builder.api_client import get_project_ssh_key
@@ -251,72 +252,80 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
     # the bootstrap below is still running.
     _install_cancellation_handlers()
 
-    try:
-        build, version = _fetch_build(api_client, build_pk)
-        build_os, memory, time_limit_seconds = _prepare_build(
-            api_client=api_client,
-            build=build,
-            version=version,
-        )
-    except BuildCancelled:
-        _cancel_build(api_client, build_pk)
-        return
-    except Exception as exc:
-        _fail_build(api_client, build_pk, exc)
-        return
-
-    structlog.contextvars.bind_contextvars(build_os=build_os)
-    log.info(
-        "Running build.",
-        memory=memory,
-        time_limit=time_limit_seconds,
-    )
-
-    # One client for the whole build: the worker starts and stops the
-    # container with it, and the runner execs into it with the same one.
-    docker_client = get_client()
+    # Defined when we get the value from the API and revoked in ``finally``.
+    clone_token = None
 
     try:
         try:
-            container = start_container(
-                docker_client, build_pk=build_pk, build_os=build_os, memory=memory
+            build, version = _fetch_build(api_client, build_pk)
+            clone_token = version["project"].get("clone_token")
+            build_os, memory, time_limit_seconds = _prepare_build(
+                api_client=api_client,
+                build=build,
+                version=version,
             )
         except BuildCancelled:
             _cancel_build(api_client, build_pk)
             return
         except Exception as exc:
-            # The container never came up, so the runner can't report anything.
             _fail_build(api_client, build_pk, exc)
             return
 
-        _start_healthcheck(docker_client, container, environment, build_pk)
+        structlog.contextvars.bind_contextvars(build_os=build_os)
+        log.info(
+            "Running build.",
+            memory=memory,
+            time_limit=time_limit_seconds,
+        )
 
-        with _time_limit(time_limit_seconds):
-            run_builder(
-                api_client=api_client,
-                docker_client=docker_client,
-                build=build,
-                version=version,
-                container_name=container,
-                production_domain=production_domain,
-                allow_private_repos=_to_bool(environment.get("RTD_ALLOW_PRIVATE_REPOS")),
-                s3_endpoint_url=environment.get("AWS_S3_ENDPOINT_URL") or None,
-            )
-    except BuildCancelled:
-        # Cancelled between the container starting and the runner installing its
-        # own handlers; from there on the runner reports its own cancellation.
-        _cancel_build(api_client, build_pk)
-    except SoftTimeLimitExceeded:
-        # The flat ceiling in worker.celery, hit by a project whose
-        # container_time_limit is above it. The runner never got to finalize the
-        # Build, so do it here. Returning normally keeps task_postrun firing, so
-        # the instance still self-terminates.
-        log.warning("Task soft time limit exceeded.")
-        _fail_build(api_client, build_pk, PreContainerFailure(BuildUserError.BUILD_TIME_OUT))
+        # One client for the whole build: the worker starts and stops the
+        # container with it, and the runner execs into it with the same one.
+        docker_client = get_client()
+
+        try:
+            try:
+                container = start_container(
+                    docker_client, build_pk=build_pk, build_os=build_os, memory=memory
+                )
+            except BuildCancelled:
+                _cancel_build(api_client, build_pk)
+                return
+            except Exception as exc:
+                # The container never came up, so the runner can't report anything.
+                _fail_build(api_client, build_pk, exc)
+                return
+
+            _start_healthcheck(docker_client, container, environment, build_pk)
+
+            with _time_limit(time_limit_seconds):
+                run_builder(
+                    api_client=api_client,
+                    docker_client=docker_client,
+                    build=build,
+                    version=version,
+                    container_name=container,
+                    production_domain=production_domain,
+                    allow_private_repos=_to_bool(environment.get("RTD_ALLOW_PRIVATE_REPOS")),
+                    s3_endpoint_url=environment.get("AWS_S3_ENDPOINT_URL") or None,
+                )
+        except BuildCancelled:
+            # Cancelled between the container starting and the runner installing its
+            # own handlers; from there on the runner reports its own cancellation.
+            _cancel_build(api_client, build_pk)
+        except SoftTimeLimitExceeded:
+            # The flat ceiling in worker.celery, hit by a project whose
+            # container_time_limit is above it. The runner never got to finalize the
+            # Build, so do it here. Returning normally keeps task_postrun firing, so
+            # the instance still self-terminates.
+            log.warning("Task soft time limit exceeded.")
+            _fail_build(api_client, build_pk, PreContainerFailure(BuildUserError.BUILD_TIME_OUT))
+        finally:
+            # The container outlives the runner by design — nothing else reads it,
+            # and leaving it behind would strand the instance's memory budget.
+            stop_container(docker_client, build_pk)
     finally:
-        # The container outlives the runner by design — nothing else reads it,
-        # and leaving it behind would strand the instance's memory budget.
-        stop_container(docker_client, build_pk)
+        # Always revoke the GitHub App token no matter what happened.
+        _revoke_clone_token(clone_token)
 
 
 def _sync_versions(*, project, repo_url, ssh_key, git_env):
@@ -483,6 +492,38 @@ def _prepare_build(*, api_client, build, version):
     _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
     return build_os, memory, time_limit_seconds
+
+
+def _revoke_clone_token(clone_token):
+    """
+    Kill the GitHub App token this build cloned with.
+
+    GitHub expires it after an hour and that isn't configurable.
+    We call ``DELETE /installation/token`` to end it once the build is done.
+    """
+    prefix = "x-access-token:"
+    # Empty for SSH projects and for public repos, which clone unauthenticated.
+    if not clone_token or not clone_token.startswith(prefix):
+        return
+
+    try:
+        response = requests.delete(
+            "https://api.github.com/installation/token",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {clone_token.removeprefix(prefix)}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=constants.REVOKE_CLONE_TOKEN_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        log.info("Failed to revoke the clone token.", exc_info=True)
+        return
+
+    if response.status_code == 204:
+        log.info("Clone token revoked.")
+    else:
+        log.info("Failed to revoke the clone token.", status_code=response.status_code)
 
 
 @task_postrun.connect

@@ -4,6 +4,7 @@ import time
 import types
 
 import pytest
+import requests
 
 from builder.exceptions import BuildCancelled
 from conftest import API_URL
@@ -598,3 +599,69 @@ def test_no_healthcheck_host_is_a_no_op():
     tasks._start_healthcheck(client, "build-42", {}, 42)
 
     assert client.execs == []
+
+
+# ---------------------------------------------------------------------------
+# Clone token revocation
+# ---------------------------------------------------------------------------
+
+
+REVOKE_URL = "https://api.github.com/installation/token"
+
+
+def test_revoke_clone_token_deletes_the_installation_token(requests_mock):
+    requests_mock.delete(REVOKE_URL, status_code=204)
+
+    tasks._revoke_clone_token("x-access-token:ghs_secret")
+
+    request = requests_mock.request_history[0]
+    assert request.method == "DELETE"
+    assert request.url == REVOKE_URL
+    assert request.headers["Authorization"] == "Bearer ghs_secret"
+
+
+def test_revoke_clone_token_skips_projects_without_a_token(requests_mock):
+    """SSH projects and public repos clone unauthenticated."""
+    tasks._revoke_clone_token(None)
+    tasks._revoke_clone_token("")
+
+    assert requests_mock.request_history == []
+
+
+def test_revoke_clone_token_skips_an_unrecognized_token_format(requests_mock):
+    tasks._revoke_clone_token("ghs_secret")
+
+    assert requests_mock.request_history == []
+
+
+def test_run_build_revokes_the_clone_token_when_it_fails_before_the_container(monkeypatch):
+    """
+    ``_prepare_build`` failing takes an early return, after the token was
+    already minted — the ``finally`` has to cover that exit too.
+    """
+    revoked = []
+
+    def _boom(**kwargs):
+        raise ValueError("no config file")
+
+    monkeypatch.setattr(tasks, "set_scale_in_protection", lambda protected: None)
+    monkeypatch.setattr(tasks, "_install_cancellation_handlers", lambda: None)
+    monkeypatch.setattr(
+        tasks,
+        "_fetch_build",
+        lambda api_client, build_pk: (
+            {"id": 42},
+            {"project": {"clone_token": "x-access-token:ghs_secret"}},
+        ),
+    )
+    monkeypatch.setattr(tasks, "_prepare_build", _boom)
+    monkeypatch.setattr(tasks, "_fail_build", lambda *args: None)
+    monkeypatch.setattr(tasks, "_revoke_clone_token", revoked.append)
+
+    tasks.run_build(
+        build_pk=42,
+        build_api_key="key",
+        environment={"RTD_API_URL": API_URL, "RTD_PRODUCTION_DOMAIN": "rtd.org"},
+    )
+
+    assert revoked == ["x-access-token:ghs_secret"]
