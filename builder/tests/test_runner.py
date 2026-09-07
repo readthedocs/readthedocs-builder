@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 from conftest import make_director
 
+from builder.constants import MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
@@ -519,16 +520,16 @@ def test_validate_artifacts_leaves_an_already_named_file_alone(docroot):
 
 
 # ---------------------------------------------------------------------------
-# _log_directory_size
+# _compute_directory_size
 # ---------------------------------------------------------------------------
 
 
-def test_log_directory_size_logs_the_size_in_megabytes(tmp_path):
+def test_compute_directory_size_logs_the_size_in_megabytes(tmp_path):
     runner = Runner(make_director().data)
     (tmp_path / "big.bin").write_bytes(b"\0" * 3 * 1024 * 1024)
 
     with mock.patch("builder.runner.log") as log:
-        runner._log_directory_size(str(tmp_path), "html")
+        runner._compute_directory_size(str(tmp_path), "html")
 
     kwargs = log.info.call_args.kwargs
     assert kwargs["media_type"] == "html"
@@ -536,7 +537,53 @@ def test_log_directory_size_logs_the_size_in_megabytes(tmp_path):
     assert kwargs["size"] >= 3
 
 
-def test_log_directory_size_never_raises(tmp_path):
+def test_compute_directory_size_never_raises(tmp_path):
     # A missing directory must not fail the upload it precedes.
     runner = Runner(make_director().data)
-    runner._log_directory_size(str(tmp_path / "does-not-exist"), "html")
+    runner._compute_directory_size(str(tmp_path / "does-not-exist"), "html")
+
+
+# ---------------------------------------------------------------------------
+# _check_media_size
+# ---------------------------------------------------------------------------
+
+
+def test_check_media_size_noop_under_the_limit(docroot):
+    runner = Runner(make_director().data)
+    runner.director = mock.MagicMock()
+
+    runner._check_media_size(10, "html")
+
+    runner.director.attach_notification.assert_not_called()
+
+
+def test_check_media_size_warns_and_attaches_a_notification(docroot):
+    runner = Runner(make_director().data)
+    runner.director = mock.MagicMock()
+
+    # Default limit is 1GB (1024 MB).
+    runner._check_media_size(2048, "html")
+
+    kwargs = runner.director.attach_notification.call_args.kwargs
+    assert kwargs["attached_to"] == "build/1"
+    assert kwargs["message_id"] == MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED
+    assert kwargs["format_values"] == {"media_type": "html", "size": 2048, "limit": 1024}
+
+
+def test_check_media_size_respects_the_project_override(docroot):
+    runner = Runner(make_director(project={"max_build_media_size": 4096}).data)  # MB
+    runner.director = mock.MagicMock()
+
+    runner._check_media_size(2048, "html")
+
+    runner.director.attach_notification.assert_not_called()
+
+
+def test_check_media_size_skips_unknown_sizes(docroot):
+    # ``du`` failed upstream; nothing to compare against.
+    runner = Runner(make_director().data)
+    runner.director = mock.MagicMock()
+
+    runner._check_media_size(None, "html")
+
+    runner.director.attach_notification.assert_not_called()
