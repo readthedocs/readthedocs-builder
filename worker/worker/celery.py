@@ -72,6 +72,10 @@ app.conf.task_ignore_result = True
 app.conf.task_acks_late = True
 app.conf.worker_prefetch_multiplier = 1
 
+# On broker connection loss, kombu re-queues the unacked build. Cancel the
+# running copy so the build doesn't run twice (Celery 6 default).
+app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
+
 # Wall-clock ceiling on ANY build, whatever the project asks for.
 #
 # The per-build limit is ``project.container_time_limit``, enforced by the
