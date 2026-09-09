@@ -28,6 +28,7 @@ import tempfile
 
 import structlog
 from builder.api_client import get_build
+from builder.api_client import get_project
 from builder.api_client import get_project_ssh_key
 from builder.api_client import get_version
 from builder.api_client import setup_api
@@ -483,6 +484,56 @@ def _prepare_build(*, api_client, build, version):
     _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
     return build_os, memory, time_limit_seconds
+
+
+# ``git ls-remote`` is one network round trip; the app-level default
+# (``RTD_BUILDS_TASK_TIME_LIMIT``, 2h) is sized for builds, not for this.
+SYNC_REPOSITORY_TIME_LIMIT = 120
+
+
+@app.task(
+    name="worker.tasks.sync_repository",
+    bind=True,
+    acks_late=True,
+    soft_time_limit=SYNC_REPOSITORY_TIME_LIMIT,
+    time_limit=int(SYNC_REPOSITORY_TIME_LIMIT * 1.2),
+)
+def sync_repository(self, *, project_pk, build_api_key, environment):
+    """
+    Reconcile a project's tags/branches into the database, without a build.
+
+    Unlike ``run_build`` this must NOT self-terminate the instance -- one
+    ``ls-remote`` is not worth an EC2 lifecycle.
+    """
+    structlog.contextvars.bind_contextvars(project_pk=project_pk)
+    log.info("Received sync_repository task.")
+
+    api_client = setup_api(
+        api_url=environment["RTD_API_URL"],
+        build_api_key=build_api_key,
+        production_domain=environment["RTD_PRODUCTION_DOMAIN"],
+    )
+
+    project = get_project(api_client, project_pk)
+    structlog.contextvars.bind_contextvars(project_slug=project.get("slug"))
+
+    repo_url = project.get("repo") or ""
+    ssh_key = ""
+    if repo_url.startswith("git@") or repo_url.startswith("ssh://"):
+        ssh_key = get_project_ssh_key(api_client, project_pk)
+
+    git_env = {
+        **os.environ,
+        "READTHEDOCS_GIT_CLONE_TOKEN": project.get("clone_token") or "",
+    }
+
+    try:
+        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
+    except PreContainerFailure as exc:
+        # There is no Build to attach a notification to, so the task failing is
+        # the only signal we get. Duplicated reserved versions land here.
+        log.warning("Version sync failed.", error=str(exc))
+        raise
 
 
 @task_postrun.connect
