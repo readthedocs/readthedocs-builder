@@ -383,8 +383,7 @@ def _fetch_build(api_client, build_pk):
             log_message=f"Build {build_pk} not found via API.",
         )
 
-    # Cancelled while queued. Workers run without mingle, so one started
-    # after the revoke was broadcast doesn't know about it.
+    # Check for builds that were cancelled in the DB while queued in Redis.
     if build.get("state") == "cancelled":
         log.info("Build already cancelled. Skipping.", build_pk=build_pk)
         raise BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
