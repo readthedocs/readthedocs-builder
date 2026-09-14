@@ -65,6 +65,10 @@ class APIProject:
         # ``Project.objects.is_active`` (not just the ``skip`` field).
         self.skip = data.get("skip", False)
 
+        # Per-project artifact size limit in MB (falls back to
+        # ``settings.RTD_BUILD_MEDIA_MAX_SIZE`` when unset).
+        self.max_build_media_size = data.get("max_build_media_size")
+
         # Feature flags & per-project env vars come back as structured fields.
         self._features = data.get("features", []) or []
         self._environment_variables = data.get("environment_variables", {}) or {}

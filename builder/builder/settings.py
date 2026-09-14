@@ -45,4 +45,10 @@ RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS = _bool(
     "RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS", default=False
 )
 
+# Default maximum size (in MB) allowed per media type when uploading build
+# artifacts. Warning-only for now: over-limit uploads still succeed, but a
+# warning notification is attached to the build. Overridable per-project via
+# ``Project.max_build_media_size``.
+RTD_BUILD_MEDIA_MAX_SIZE = int(os.environ.get("RTD_BUILD_MEDIA_MAX_SIZE", "1024"))
+
 
