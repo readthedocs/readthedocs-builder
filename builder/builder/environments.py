@@ -274,6 +274,7 @@ class BuildCommand(BuildCommandResultMixin):
         - Strips NUL bytes (PostgreSQL won't accept them in text columns).
         - Truncates to ``DATA_UPLOAD_MAX_OUTPUT_BYTES`` to fit a single API request.
         - Obfuscates values of private project environment variables.
+        - Obfuscates the Git clone token.
         """
         sanitized = ""
         try:
@@ -301,6 +302,15 @@ class BuildCommand(BuildCommandResultMixin):
                     value = spec["value"]
                     obfuscated_value = f"{value[:4]}****"
                     sanitized = sanitized.replace(value, obfuscated_value)
+
+            # Obfuscate the Git clone token.
+            clone_token = getattr(self.build_env.project, "clone_token", None)
+            if clone_token:
+                # The clone token has the ``<username>:<secret>`` format.
+                secret = clone_token.split(":", 1)[-1]
+                for value in (clone_token, secret):
+                    if value:
+                        sanitized = sanitized.replace(value, "****")
 
         return sanitized
 

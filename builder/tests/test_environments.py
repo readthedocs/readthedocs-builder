@@ -370,6 +370,23 @@ def test_sanitize_output_obfuscates_private_env_vars():
     assert cmd.sanitize_output("private-value") == "priv****"
 
 
+def test_sanitize_output_obfuscates_clone_token():
+    project = APIProject(slug="test-project", clone_token="x-access-token:1234")
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], build_env=make_env(project=project))
+    # Both the remote-URL form and the bare secret are masked.
+    assert (
+        cmd.sanitize_output("https://x-access-token:1234@github.com/org/repo")
+        == "https://****@github.com/org/repo"
+    )
+    assert cmd.sanitize_output("the token is 1234") == "the token is ****"
+    assert cmd.sanitize_output("no token here") == "no token here"
+
+
+def test_sanitize_output_without_clone_token():
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], build_env=make_env())
+    assert cmd.sanitize_output("nothing to mask") == "nothing to mask"
+
+
 # ---------------------------------------------------------------------------
 # BuildCommand.save
 # ---------------------------------------------------------------------------
