@@ -244,6 +244,24 @@ def test_fetch_build_fails_when_the_build_does_not_exist(api_client, requests_mo
     assert excinfo.value.message_id == BuildAppError.GENERIC_WITH_BUILD_ID
 
 
+def test_fetch_build_raises_cancelled_when_the_build_was_cancelled_while_queued(
+    api_client, requests_mock
+):
+    # A worker started after the revoke was broadcast doesn't know about it
+    # (no mingle), so the build's own state is the source of truth.
+    requests_mock.get(
+        f"{API_URL}/api/v2/build/42/",
+        json={"id": 42, "version": 10, "state": "cancelled"},
+        headers=JSON,
+    )
+
+    with pytest.raises(BuildCancelled):
+        tasks._fetch_build(api_client, 42)
+
+    # Stops before the version is fetched.
+    assert not requests_for(requests_mock, "GET", "/api/v2/version/10/")
+
+
 def test_fail_build_reports_the_message_id_from_the_exception(api_client, fail_build_api):
     tasks._fail_build(api_client, 42, PreContainerFailure(BuildUserError.BUILD_OS_REQUIRED))
 

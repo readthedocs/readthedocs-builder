@@ -516,3 +516,27 @@ def test_validate_artifacts_leaves_an_already_named_file_alone(docroot):
 
     assert runner._validate_artifacts() == ["html", "pdf"]
     assert (pdf_dir / "pip.pdf").read_text() == "%PDF-1.4"
+
+
+# ---------------------------------------------------------------------------
+# _log_directory_size
+# ---------------------------------------------------------------------------
+
+
+def test_log_directory_size_logs_the_size_in_megabytes(tmp_path):
+    runner = Runner(make_director().data)
+    (tmp_path / "big.bin").write_bytes(b"\0" * 3 * 1024 * 1024)
+
+    with mock.patch("builder.runner.log") as log:
+        runner._log_directory_size(str(tmp_path), "html")
+
+    kwargs = log.info.call_args.kwargs
+    assert kwargs["media_type"] == "html"
+    # ``du -m`` rounds up to whole megabytes, and adds the directory's own blocks.
+    assert kwargs["size"] >= 3
+
+
+def test_log_directory_size_never_raises(tmp_path):
+    # A missing directory must not fail the upload it precedes.
+    runner = Runner(make_director().data)
+    runner._log_directory_size(str(tmp_path / "does-not-exist"), "html")
