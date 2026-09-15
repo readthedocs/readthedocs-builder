@@ -6,10 +6,9 @@
 #
 # There is a SINGLE lockfile (uv.lock, next to this file) for the whole
 # workspace, and a SINGLE venv: ``uv sync --package worker`` pulls in
-# ``builder`` too, because the worker imports it. See the
-# readthedocs-builder-setup.service systemd unit, which lives with the
-# build-isolated AMI Packer config in readthedocs-ops at
-# salt/base/utils/ops/build-isolated/systemd/.
+# ``builder`` too, because the worker imports it. That sync runs at AMI
+# bake time -- see builder.pkr.hcl in readthedocs-ops at
+# salt/base/utils/ops/build-isolated/.
 [tool.uv.workspace]
 members = ["builder", "worker"]
 
