@@ -39,6 +39,7 @@ from builder.lsremote import parse_lsremote
 from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
+from celery.signals import task_received
 
 from worker import constants
 from worker.celery import app
@@ -539,6 +540,27 @@ def sync_repository(self, *, project_pk, build_api_key, environment):
         # the only signal we get. Duplicated reserved versions land here.
         log.warning("Version sync failed.", error=str(exc))
         raise
+
+
+@task_received.connect
+def _on_run_build_received(sender, request=None, **_):
+    """
+    Stop consuming the queue as soon as the one build this instance runs arrives.
+
+    ``--max-tasks-per-child=1`` only recycles the pool child; the main process
+    keeps consuming. Once the build finishes and is acked (``acks_late``), the
+    freed prefetch slot lets it grab a second build while the instance is
+    already terminating, and that build dies with it.
+
+    ``task_received`` fires in the main process with the Consumer as
+    ``sender``, and at that point the only prefetch slot is held by this
+    message, so cancelling here guarantees nothing else is fetched.
+    """
+    if request is None or request.name != "worker.tasks.run_build":
+        return
+
+    log.info("Cancelling queue consumer; this instance runs one build only.")
+    sender.cancel_task_queue(constants.RUN_BUILD_TASK_QUEUE)
 
 
 @task_postrun.connect
