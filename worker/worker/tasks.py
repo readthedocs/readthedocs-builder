@@ -164,7 +164,7 @@ def _cancel_build(api_client, build_pk: int) -> None:
     Only called when the signal lands outside the runner: once the runner is
     driving the build it catches ``BuildCancelled`` itself and reports it.
     """
-    log.warning("Build cancelled.", build_pk=build_pk)
+    log.warning("Build cancelled.", build_id=build_pk)
     _post_notification(api_client, build_pk, BuildCancelled.CANCELLED_BY_USER, {})
     _finalize_build(api_client, build_pk, state="cancelled")
 
@@ -188,7 +188,7 @@ def _post_notification(api_client, build_pk: int, message_id: str, format_values
             }
         )
     except Exception:
-        log.exception("Failed to POST notification for build.", build_pk=build_pk)
+        log.exception("Failed to POST notification for build.", build_id=build_pk)
 
 
 def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
@@ -202,7 +202,7 @@ def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
             }
         )
     except Exception:
-        log.exception("Failed to PATCH build to final state.", build_pk=build_pk, state=state)
+        log.exception("Failed to PATCH build to final state.", build_id=build_pk, state=state)
 
 
 @app.task(name="worker.tasks.run_build", bind=True, acks_late=True)
@@ -230,7 +230,7 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
     notification. Then return normally so ``task_postrun`` still fires
     and the instance self-terminates.
     """
-    structlog.contextvars.bind_contextvars(build_pk=build_pk)
+    structlog.contextvars.bind_contextvars(build_id=build_pk)
     log.info("Received run_build task.", no_self_terminate=no_self_terminate)
 
     # Keep the ASG from scaling this instance out from under the build.
@@ -386,7 +386,7 @@ def _fetch_build(api_client, build_pk):
 
     # Check for builds that were cancelled in the DB while queued in Redis.
     if build.get("state") == "cancelled":
-        log.info("Build already cancelled. Skipping.", build_pk=build_pk)
+        log.info("Build already cancelled. Skipping.", build_id=build_pk)
         raise BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
 
     version_pk = build.get("version")
@@ -510,7 +510,7 @@ def sync_repository(self, *, project_pk, build_api_key, environment):
     Unlike ``run_build`` this must NOT self-terminate the instance -- one
     ``ls-remote`` is not worth an EC2 lifecycle.
     """
-    structlog.contextvars.bind_contextvars(project_pk=project_pk)
+    structlog.contextvars.bind_contextvars(project_id=project_pk)
     log.info("Received sync_repository task.")
 
     api_client = setup_api(

@@ -57,7 +57,7 @@ def run_build(
     API — the worker's job was to get us this far.
     """
     build_pk = build["id"]
-    structlog.contextvars.bind_contextvars(build_pk=build_pk)
+    structlog.contextvars.bind_contextvars(build_id=build_pk)
 
     version = APIVersion(**version)
     project = version.project
