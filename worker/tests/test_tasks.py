@@ -316,16 +316,21 @@ def test_cancel_build_finalizes_the_build_as_cancelled(api_client, fail_build_ap
 
 def test_cancellation_handlers_raise_build_cancelled():
     """A revoke lands as SIGINT; it must not surface as a KeyboardInterrupt."""
-    previous = signal.getsignal(signal.SIGINT)
-    try:
-        tasks._install_cancellation_handlers()
-
-        with pytest.raises(BuildCancelled) as excinfo:
+    with pytest.raises(BuildCancelled) as excinfo:
+        with tasks._cancellation_handlers():
             os.kill(os.getpid(), signal.SIGINT)
-    finally:
-        signal.signal(signal.SIGINT, previous)
 
     assert excinfo.value.message_id == BuildCancelled.CANCELLED_BY_USER
+
+
+def test_cancellation_handlers_are_restored_after_the_task():
+    """Otherwise billiard's recycle SIGTERM logs a false cancellation."""
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    with tasks._cancellation_handlers():
+        assert signal.getsignal(signal.SIGTERM) is not previous[signal.SIGTERM]
+
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous
 
 
 @pytest.fixture
