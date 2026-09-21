@@ -29,3 +29,7 @@ CONFIG_FILENAMES = (
 # tags/branches the worker ls-remotes.
 SYNC_VERSIONS_TASK_NAME = "readthedocs.builds.tasks.sync_versions_task"
 SYNC_VERSIONS_TASK_QUEUE = "web"
+
+# The only queue this worker consumes; must match ``-Q`` in the systemd unit.
+# NOTE: this should eventually be read from an environment variable.
+RUN_BUILD_TASK_QUEUE = "build:isolated"

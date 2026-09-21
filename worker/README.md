@@ -5,8 +5,9 @@ The host-side half of an isolated build. A minimal Celery worker that runs
 
 It's installed on a Packer-baked AMI and runs as a systemd service, one worker
 process per EC2 instance in the `build-isolated` ASG. The worker consumes the
-`build:isolated` queue with `--max-tasks-per-child=1`, so it handles a single
-`run_build` task and exits.
+`build:isolated` queue and cancels that consumer as soon as its first
+`run_build` task arrives, so it handles a single build and then the instance
+is terminated.
 
 It never imports the runner and never touches user code — the host orchestrates,
 the container builds.

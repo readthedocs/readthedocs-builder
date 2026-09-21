@@ -329,6 +329,33 @@ def test_cancellation_handlers_raise_build_cancelled():
 
 
 @pytest.fixture
+def consumer():
+    """A stand-in for the Celery Consumer that records cancelled queues."""
+    cancelled = []
+    return types.SimpleNamespace(cancel_task_queue=cancelled.append, cancelled=cancelled)
+
+
+def test_task_received_cancels_the_queue_consumer(consumer):
+    """
+    The main process must stop consuming on the first build, or it grabs a
+    second one while the instance is already terminating.
+    """
+    request = types.SimpleNamespace(name="worker.tasks.run_build")
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == ["build:isolated"]
+
+
+def test_task_received_ignores_other_tasks(consumer):
+    request = types.SimpleNamespace(name="some.other.task")
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == []
+
+
+@pytest.fixture
 def postrun(monkeypatch):
     """Record the ordered instance-lifecycle calls the postrun handler makes."""
     calls = []
