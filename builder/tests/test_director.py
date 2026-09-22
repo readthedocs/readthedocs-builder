@@ -871,6 +871,54 @@ def test_setup_vcs_checks_out_and_records_commit(docroot):
     assert director.data.build["commit"] == "abc123"
 
 
+def _setup_vcs_with_mocked_checkout(director):
+    """Run ``setup_vcs`` with the clone stubbed and the mocked repo kept."""
+    with mock.patch.object(director, "checkout"), mock.patch.object(
+        director, "run_build_job"
+    ), mock.patch.object(
+        director.data.project, "vcs_repo", return_value=director.vcs_repository
+    ):
+        director.setup_vcs()
+
+
+def test_setup_vcs_records_the_base_commit_when_the_pr_merged_it_in(docroot):
+    director = make_director(SPHINX, version={"type": "external", "base_commit": "base123"})
+    director.vcs_repository.contains_commit.return_value = True
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    director.vcs_repository.contains_commit.assert_called_once_with("base123")
+    assert director.data.build["base_commit"] == "base123"
+
+
+def test_setup_vcs_skips_the_base_commit_when_the_pr_did_not_merge_it_in(docroot):
+    director = make_director(SPHINX, version={"type": "external", "base_commit": "base123"})
+    director.vcs_repository.contains_commit.return_value = False
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    assert "base_commit" not in director.data.build
+
+
+def test_setup_vcs_skips_the_base_commit_check_without_one(docroot):
+    # The API only sends ``base_commit`` for pull requests with a built base.
+    director = make_director(SPHINX, version={"type": "external", "base_commit": None})
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    director.vcs_repository.contains_commit.assert_not_called()
+    assert "base_commit" not in director.data.build
+
+
+def test_setup_vcs_skips_the_base_commit_check_for_internal_versions(docroot):
+    director = make_director(SPHINX, version={"type": "branch", "base_commit": "base123"})
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    director.vcs_repository.contains_commit.assert_not_called()
+    assert "base_commit" not in director.data.build
+
+
 # ---------------------------------------------------------------------------
 # install_build_tools (S3 cache)
 # ---------------------------------------------------------------------------

@@ -159,6 +159,35 @@ def test_update_checks_out_the_requested_branch(git_repo, docroot):
     assert exists(os.path.join(repo.working_dir, "README"))
 
 
+def test_contains_commit_only_once_the_base_is_merged_in(git_repo, docroot):
+    # ``submodule`` branched off before master's tip commit, so a clone of it
+    # doesn't hold that commit until the branch merges master in.
+    base_commit = current_commit(git_repo)
+    repo = make_backend(
+        git_repo,
+        version_type=BRANCH,
+        slug="submodule",
+        verbose_name="submodule",
+        identifier="submodule",
+    )
+    repo.update()
+    repo.checkout("submodule")
+    assert repo.contains_commit(base_commit) is False
+
+    git(git_repo, "checkout", "submodule")
+    git(git_repo, "merge", "--no-edit", "master")
+    repo.fetch()
+    repo.checkout("submodule")
+    assert repo.contains_commit(base_commit) is True
+
+
+def test_contains_commit_is_false_for_an_unknown_commit(git_repo, docroot):
+    # git exits 128 for a commit the clone has never seen; that's "no", not an error.
+    repo = make_backend(git_repo)
+    repo.update()
+    assert repo.contains_commit("0" * 40) is False
+
+
 def test_update_machine_latest_fetches_head(git_repo, docroot):
     # A machine-created "latest" with no project default branch fetches the
     # remote HEAD symref instead of a named branch.

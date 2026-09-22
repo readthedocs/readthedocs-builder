@@ -270,12 +270,13 @@ class Runner:
         PATCH the build fields resolved during checkout.
 
         ``setup_vcs`` records the commit, the parsed ``config`` (``as_dict``),
-        and the ``readthedocs_yaml_path`` on ``self.data.build`` after the clone
+        the ``readthedocs_yaml_path`` and, for pull requests that merged in the
+        base branch, the ``base_commit`` on ``self.data.build`` after the clone
         + config load.
         """
         payload = {
             field: self.data.build[field]
-            for field in ("commit", "config", "readthedocs_yaml_path")
+            for field in ("commit", "base_commit", "config", "readthedocs_yaml_path")
             if self.data.build.get(field) is not None
         }
         if payload:

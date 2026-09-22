@@ -409,6 +409,21 @@ class Backend:
         _, stdout, _ = self.run("git", "rev-parse", "HEAD", record=False)
         return stdout.strip()
 
+    def contains_commit(self, commit: str) -> bool:
+        """
+        Whether ``commit`` is an ancestor of ``HEAD`` in the working directory.
+
+        Used on pull request builds to tell if the base branch was merged into
+        the PR. No extra fetch is needed: the shallow clone only holds the base
+        commit when it's reachable from ``HEAD``, which is exactly the question.
+        A commit missing from the clone (not merged in, or beyond the fetch
+        depth) is reported as not contained.
+        """
+        exit_code, _, _ = self.run(
+            "git", "merge-base", "--is-ancestor", commit, "HEAD", record=False
+        )
+        return exit_code == 0
+
     def get_default_branch(self) -> str:
         """Resolve the remote's default branch via ``git symbolic-ref``."""
         cmd = ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
