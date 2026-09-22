@@ -127,7 +127,7 @@ class BuildDirector:
         # in ``runuser`` and owned by the build user.
         if not os.path.exists(self.data.project.doc_path):
             self.vcs_environment.run(
-                "mkdir",
+                binaries.MKDIR,
                 "--parents",
                 self.data.project.doc_path,
                 cwd="/",
@@ -319,7 +319,7 @@ class BuildDirector:
         # can confirm what we're using.
         if final_config_file:
             self.vcs_environment.run(
-                "cat",
+                binaries.CAT,
                 final_config_file.replace(checkout_path + "/", ""),
                 cwd=checkout_path,
             )
@@ -487,7 +487,7 @@ class BuildDirector:
         soon-to-be-broken build.
         """
         command = self.build_environment.run(
-            "test",
+            binaries.TEST,
             "-x",
             "_build/html",
             cwd=self.data.project.checkout_path(self.data.version.slug),
@@ -611,7 +611,7 @@ class BuildDirector:
                 # Move the extracted ``<full_version>`` directory into asdf's
                 # canonical install location.
                 cmd = [
-                    "mv",
+                    binaries.MV,
                     f"{extract_path}/{full_version}",
                     os.path.join(
                         settings.RTD_DOCKER_WORKDIR,
@@ -728,7 +728,7 @@ class BuildDirector:
 
         key_path = self._write_ssh_key(private_key)
         try:
-            agent = self.vcs_environment.run("ssh-agent", "-s", record=False)
+            agent = self.vcs_environment.run(binaries.CONTAINER_SSH_AGENT, "-s", record=False)
             agent_env = parse_ssh_agent_env(agent.output)
             if not agent_env.get("SSH_AUTH_SOCK"):
                 log.warning("ssh-agent did not report SSH_AUTH_SOCK.", output=agent.output)
@@ -747,7 +747,7 @@ class BuildDirector:
             # missed. The TTL outlasts the build's time limit so it never
             # expires mid-build.
             self.vcs_environment.run(
-                "ssh-add", "-t", str(self._ssh_key_ttl()), key_path, record=False
+                binaries.CONTAINER_SSH_ADD, "-t", str(self._ssh_key_ttl()), key_path, record=False
             )
         finally:
             # The agent holds the key now; the file is no longer needed.
@@ -764,7 +764,7 @@ class BuildDirector:
         key_dir = Path(self.data.project.doc_path) / "checkouts"
         assert_path_is_inside_docroot(key_dir)
         self.vcs_environment.run(
-            "mkdir",
+            binaries.MKDIR,
             "--parents",
             str(key_dir),
             cwd="/",
@@ -987,7 +987,7 @@ class BuildDirector:
             Path(self.data.project.checkout_path(self.data.version.slug)) / "artifacts.zip"
         )
         self.build_environment.run(
-            "mkdir",
+            binaries.MKDIR,
             "-p",
             str(destination.parent),
             record=False,
@@ -1012,13 +1012,13 @@ class BuildDirector:
 
         log.info("Extracting build artifacts.")
         self.build_environment.run(
-            "mkdir",
+            binaries.MKDIR,
             "-p",
             destination,
             record=False,
         )
         result = self.build_environment.run(
-            "unzip",
+            binaries.UNZIP,
             source,
             "-d",
             destination,

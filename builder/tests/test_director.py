@@ -88,7 +88,7 @@ def _run_creating_dirs(director, output=""):
     result.output = output
 
     def _run(*args, **kwargs):
-        if args and args[0] == "mkdir":
+        if args and args[0] == binaries.MKDIR:
             os.makedirs(args[-1], exist_ok=True)
         return result
 
@@ -149,8 +149,8 @@ def test_setup_ssh_agent_loads_key_and_injects_env(docroot, monkeypatch):
     director.vcs_environment._environment.update.assert_called_with(director.ssh_agent_env)
 
     # ssh-agent started, then the key added with a TTL that outlasts the limit.
-    assert _calls_named(director, "ssh-agent")[0].args == ("ssh-agent", "-s")
-    add_args = _calls_named(director, "ssh-add")[0].args
+    assert _calls_named(director, binaries.CONTAINER_SSH_AGENT)[0].args == (binaries.CONTAINER_SSH_AGENT, "-s")
+    add_args = _calls_named(director, binaries.CONTAINER_SSH_ADD)[0].args
     assert add_args[1] == "-t"
     assert int(add_args[2]) > 900
 
@@ -192,7 +192,7 @@ def test_setup_ssh_agent_passes_the_docroot_path_to_ssh_add(docroot, monkeypatch
 
     director.setup_ssh_agent()
 
-    ssh_add_path = Path(_calls_named(director, "ssh-add")[0].args[3])
+    ssh_add_path = Path(_calls_named(director, binaries.CONTAINER_SSH_ADD)[0].args[3])
     assert ssh_add_path.is_relative_to(Path(settings.DOCROOT))
 
 
@@ -851,7 +851,7 @@ def test_setup_vcs_creates_the_checkout_dir_via_the_environment(docroot):
     ):
         director.setup_vcs()
     mkdir_calls = [
-        c for c in director.vcs_environment.run.call_args_list if c.args[:1] == ("mkdir",)
+        c for c in director.vcs_environment.run.call_args_list if c.args[:1] == (binaries.MKDIR,)
     ]
     assert len(mkdir_calls) == 1
     assert director.data.project.doc_path in mkdir_calls[0].args
@@ -930,7 +930,7 @@ def test_install_build_tools_cache_hit_extracts_tarball(docroot):
     # The root-owned extracted tree is handed to the build user (as root)
     # before the docs-user ``mv`` can rename out of it.
     chown_idx = next(i for i, a in enumerate(argvs) if a and a[0] == binaries.CHOWN)
-    mv_idx = next(i for i, a in enumerate(argvs) if a and a[0] == "mv")
+    mv_idx = next(i for i, a in enumerate(argvs) if a and a[0] == binaries.MV)
     assert calls[chown_idx].kwargs["user"] == "root"
     assert "--recursive" in calls[chown_idx].args
     assert chown_idx < mv_idx
@@ -1172,7 +1172,7 @@ def test_ssh_key_directory_is_created_by_the_build_user(docroot):
 
     director._write_ssh_key("PRIVATE-KEY-CONTENT")
 
-    mkdir = _calls_named(director, "mkdir")[0]
+    mkdir = _calls_named(director, binaries.MKDIR)[0]
     assert mkdir.args[-1].endswith("/checkouts")
     # A swallowed failure here surfaces much later, as a checkout that can't
     # create its working directory.
@@ -1264,7 +1264,7 @@ def test_download_artifacts_from_storage(docroot):
     # The dir is created through the build environment so it's owned by the
     # build user rather than root.
     call = director.build_environment.run.call_args
-    assert call.args == ("mkdir", "-p", str(checkout))
+    assert call.args == (binaries.MKDIR, "-p", str(checkout))
     assert call.kwargs["record"] is False
 
 
@@ -1288,8 +1288,8 @@ def test_extract_artifacts_unzips_into_the_output_directory(docroot):
     argvs = [call.args for call in director.build_environment.run.call_args_list]
     # The commands are recorded and shown in the build UI, so they reference the
     # ``READTHEDOCS_*`` variables instead of the expanded paths.
-    mkdir = ("mkdir", "-p", "$READTHEDOCS_OUTPUT")
-    unzip = ("unzip", "$READTHEDOCS_REPOSITORY_PATH/artifacts.zip", "-d", "$READTHEDOCS_OUTPUT")
+    mkdir = (binaries.MKDIR, "-p", "$READTHEDOCS_OUTPUT")
+    unzip = (binaries.UNZIP, "$READTHEDOCS_REPOSITORY_PATH/artifacts.zip", "-d", "$READTHEDOCS_OUTPUT")
     assert argvs.index(mkdir) < argvs.index(unzip)
     # ``run`` raises ``BuildUserError(GENERIC)`` on a failed command unless the
     # caller opts out; without that the specific notification below would be

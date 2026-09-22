@@ -26,6 +26,7 @@ from conftest import git
 from conftest import make_backend
 from conftest import submodules_config
 
+from builder import binaries
 from builder.constants import ALL
 from builder.constants import BRANCH
 from builder.constants import EXTERNAL
@@ -207,7 +208,7 @@ def test_run_translates_a_failed_command_to_repository_error(git_repo, docroot):
         repo.environment, "run", side_effect=BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
     ):
         with pytest.raises(BuildCancelled):
-            repo.run("git", "status")
+            repo.run(binaries.CONTAINER_GIT, "status")
 
 
 def test_clone_error_maps_to_public_repo_message(git_repo, docroot):
@@ -252,7 +253,7 @@ def test_check_working_dir_creates_the_dir_via_a_wrapped_command(git_repo, docro
         repo.check_working_dir()
 
     assert exists(repo.working_dir)
-    assert run.call_args.args[0] == "mkdir"
+    assert run.call_args.args[0] == binaries.MKDIR
 
 
 def test_check_working_dir_is_a_noop_when_the_dir_exists(git_repo, docroot):
