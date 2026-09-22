@@ -163,6 +163,18 @@ class BuildDirector:
         if commit:
             self.data.build["commit"] = commit
 
+        # Pull request builds: report the base commit once the PR has merged it
+        # in, so the file tree diff refreshes the base snapshot it compares
+        # against (see ``FileManifestIndexer`` in readthedocs.org). Only the
+        # clone can answer this, which is why it's the builder's job.
+        base_commit = self.data.version.base_commit
+        if (
+            self.data.version.is_external
+            and base_commit
+            and self.vcs_repository.contains_commit(base_commit)
+        ):
+            self.data.build["base_commit"] = base_commit
+
     def create_vcs_environment(self):
         """Build the VCS-time :class:`BuildEnvironment` (no config yet)."""
         self.vcs_environment = self.data.environment_class(
