@@ -16,6 +16,7 @@ from unittest import mock
 import pytest
 from conftest import make_director
 
+from builder import binaries
 from builder import settings
 from builder.constants import GENERIC
 from builder.exceptions import BuildAppError
@@ -597,7 +598,7 @@ def test_system_dependencies_installs_apt_packages(docroot):
     director.system_dependencies()
     # apt-get update, then install with a ``--`` guard before package names.
     calls = director.build_environment.run.call_args_list
-    assert calls[0].args[:2] == ("apt-get", "update")
+    assert calls[0].args[:2] == (binaries.APT_GET, "update")
     install_args = calls[1].args
     assert "--" in install_args
     assert install_args[install_args.index("--") + 1 :] == ("libfoo", "libbar")
@@ -928,7 +929,7 @@ def test_install_build_tools_cache_hit_extracts_tarball(docroot):
     argvs = [c.args for c in calls]
     # The root-owned extracted tree is handed to the build user (as root)
     # before the docs-user ``mv`` can rename out of it.
-    chown_idx = next(i for i, a in enumerate(argvs) if a and a[0] == "chown")
+    chown_idx = next(i for i, a in enumerate(argvs) if a and a[0] == binaries.CHOWN)
     mv_idx = next(i for i, a in enumerate(argvs) if a and a[0] == "mv")
     assert calls[chown_idx].kwargs["user"] == "root"
     assert "--recursive" in calls[chown_idx].args

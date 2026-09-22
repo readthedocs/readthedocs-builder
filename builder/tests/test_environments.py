@@ -23,6 +23,7 @@ from slumber.exceptions import HttpNotFoundError
 
 from builder.api_models import APIProject
 from builder.constants import RTD_SKIP_BUILD_EXIT_CODE
+from builder import binaries
 from builder.environments import BuildCommand
 from builder.environments import BuildEnvironment
 from builder.environments import DockerBuildCommand
@@ -96,22 +97,26 @@ def make_docker_command(command, **kwargs):
 
 def test_wrapped_command_runs_through_a_shell_under_nice():
     cmd = make_docker_command(("echo", "hi"))
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'echo hi'"
+    assert cmd.get_wrapped_command() == "/usr/bin/nice -n 10 /bin/sh -c 'echo hi'"
 
 
 def test_wrapped_command_prepends_bin_path_to_the_container_path():
     cmd = make_docker_command(("python", "-V"), bin_path="/venv/bin")
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'PATH=/venv/bin:$PATH ; python -V'"
+    assert cmd.get_wrapped_command() == (
+        "/usr/bin/nice -n 10 /bin/sh -c 'PATH=/venv/bin:$PATH ; python -V'"
+    )
 
 
 def test_wrapped_command_escapes_shell_metacharacters():
     cmd = make_docker_command(("pip", "install", "requests<0.8"))
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'pip install requests\\<0.8'"
+    assert cmd.get_wrapped_command() == (
+        "/usr/bin/nice -n 10 /bin/sh -c 'pip install requests\\<0.8'"
+    )
 
 
 def test_wrapped_command_leaves_user_commands_unescaped():
     cmd = make_docker_command(("cat foo.txt | grep bar",), escape_command=False)
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'cat foo.txt | grep bar'"
+    assert cmd.get_wrapped_command() == "/usr/bin/nice -n 10 /bin/sh -c 'cat foo.txt | grep bar'"
 
 
 @pytest.mark.parametrize(
@@ -153,7 +158,7 @@ def test_docker_command_execs_into_the_container():
     assert kwargs["container"] == "build-1"
     assert kwargs["user"] == "docs"
     assert kwargs["workdir"] == "/tmp"
-    assert kwargs["cmd"] == "nice -n 10 /bin/sh -c 'echo hi'"
+    assert kwargs["cmd"] == "/usr/bin/nice -n 10 /bin/sh -c 'echo hi'"
     assert cmd.output == "output"
     assert cmd.exit_code == 0
 
@@ -584,3 +589,38 @@ def test_every_variable_our_commands_use_survives_escaping():
             f"${variable} is used in a command but missing from "
             "DockerBuildCommand._escape_command's allowlist"
         )
+
+
+def test_super_user_exec_gets_a_system_only_path():
+    build_env = make_docker_env(environment={"BIN_PATH": "/home/docs/venv/bin"})
+    client = mock.Mock()
+    client.exec_create.return_value = {"Id": "exec-id"}
+    client.exec_start.return_value = b""
+    client.exec_inspect.return_value = {"ExitCode": 0}
+    build_env.client = client
+
+    build_env.run("apt-get", "update", user="root", record=False)
+
+    _, kwargs = client.exec_create.call_args
+    assert kwargs["user"] == "root"
+    assert kwargs["environment"]["PATH"] == binaries.SUPER_USER_PATH
+    assert "/home/docs" not in kwargs["environment"]["PATH"]
+    # No user-writable ``bin_path`` prepended for root either.
+    assert kwargs["cmd"] == "/usr/bin/nice -n 10 /bin/sh -c 'apt-get update'"
+
+
+def test_docs_user_exec_keeps_the_container_path():
+    build_env = make_docker_env(environment={"BIN_PATH": "/home/docs/venv/bin"})
+    client = mock.Mock()
+    client.exec_create.return_value = {"Id": "exec-id"}
+    client.exec_start.return_value = b""
+    client.exec_inspect.return_value = {"ExitCode": 0}
+    build_env.client = client
+
+    build_env.run("python", "-V", record=False)
+
+    _, kwargs = client.exec_create.call_args
+    assert "PATH" not in kwargs["environment"]
+    assert kwargs["cmd"] == (
+        "/usr/bin/nice -n 10 /bin/sh -c 'PATH=/home/docs/venv/bin:$PATH ; python -V'"
+    )

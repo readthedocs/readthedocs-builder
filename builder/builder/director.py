@@ -19,6 +19,7 @@ from typing import Any
 
 import structlog
 
+from builder import binaries
 from builder import settings
 from builder.api_client import get_project_ssh_key
 from builder.api_models import APIProject
@@ -355,7 +356,7 @@ class BuildDirector:
         packages = self.data.config.build.apt_packages
         if packages:
             self.build_environment.run(
-                "apt-get",
+                binaries.APT_GET,
                 "update",
                 "--assume-yes",
                 "--quiet",
@@ -364,7 +365,7 @@ class BuildDirector:
             # ``--`` ends option parsing so package names that look like
             # options can't sneak through.
             self.build_environment.run(
-                "apt-get",
+                binaries.APT_GET,
                 "install",
                 "--assume-yes",
                 "--quiet",
@@ -599,7 +600,7 @@ class BuildDirector:
                 # tree is root-owned. Hand it to the build user before the
                 # docs-user ``mv`` (and later asdf/pip writes) can touch it.
                 self.build_environment.run(
-                    "chown",
+                    binaries.CHOWN,
                     "--recursive",
                     f"{settings.RTD_DOCKER_USER}:{settings.RTD_DOCKER_USER}",
                     extract_path,
