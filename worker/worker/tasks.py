@@ -114,9 +114,9 @@ def _cancellation_handlers():
     a bare ``KeyboardInterrupt`` and the build would be reported as a plain
     failure, with no cancellation notification.
 
-    The previous handlers are restored on exit. Left installed, billiard's
-    recycle SIGTERM after the task (``--max-tasks-per-child=1``) would log a
-    false "Cancellation signal received." on every build.
+    The previous handlers are restored on exit. Leaving them installed
+    would log a false "Cancellation signal received." on every build when
+    Celery recycle SIGTERM after the task due to ``--max-tasks-per-child=1``.
     """
 
     def _on_cancel(signum, frame):

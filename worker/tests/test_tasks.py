@@ -316,8 +316,7 @@ def test_cancel_build_finalizes_the_build_as_cancelled(api_client, fail_build_ap
 
 def test_cancellation_handlers_raise_build_cancelled():
     """A revoke lands as SIGINT; it must not surface as a KeyboardInterrupt."""
-    with pytest.raises(BuildCancelled) as excinfo:
-        with tasks._cancellation_handlers():
+    with pytest.raises(BuildCancelled) as excinfo, tasks._cancellation_handlers():
             os.kill(os.getpid(), signal.SIGINT)
 
     assert excinfo.value.message_id == BuildCancelled.CANCELLED_BY_USER
