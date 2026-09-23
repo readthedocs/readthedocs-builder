@@ -206,7 +206,7 @@ def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
         log.exception("Failed to PATCH build to final state.", build_pk=build_pk, state=state)
 
 
-@app.task(name="worker.tasks.run_build", bind=True, acks_late=True)
+@app.task(name=constants.RUN_BUILD_TASK_NAME, bind=True, acks_late=True)
 def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=False):
     """
     Run a single Read the Docs build.
@@ -556,7 +556,7 @@ def _on_run_build_received(sender, request=None, **_):
     ``sender``, and at that point the only prefetch slot is held by this
     message, so cancelling here guarantees nothing else is fetched.
     """
-    if request is None or request.name != "worker.tasks.run_build":
+    if request is None or request.name != constants.RUN_BUILD_TASK_NAME:
         return
 
     log.info("Cancelling queue consumer; this instance runs one build only.")
@@ -578,7 +578,7 @@ def _on_run_build_postrun(sender, kwargs=None, **_):
     is meant to consume; if some other task somehow ended up routed
     here, we don't want to terminate the host as a side effect.
     """
-    if sender is None or sender.name != "worker.tasks.run_build":
+    if sender is None or sender.name != constants.RUN_BUILD_TASK_NAME:
         return
 
     # Always released, even when we skip the terminate below: a protected
