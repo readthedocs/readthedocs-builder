@@ -7,10 +7,10 @@ import tempfile
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
-from builder import binaries
 from builder.ssh import GIT_SSH_COMMAND
 from builder.ssh import parse_ssh_agent_env
 
+from builder import binaries
 from worker import constants
 from worker.config import find_config_file
 from worker.exceptions import BuildAppError

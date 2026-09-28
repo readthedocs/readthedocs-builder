@@ -222,7 +222,9 @@ class EpubBuilder(BaseSphinx):
             # Only one .epub is supported per version.
             epub_filepath = epub_sphinx_filepaths[0]
 
-            self.run(binaries.MV, epub_filepath, temp_epub_file, cwd=self.project_path, record=False)
+            self.run(
+                binaries.MV, epub_filepath, temp_epub_file, cwd=self.project_path, record=False
+            )
             self.run(
                 binaries.RM,
                 "--recursive",
