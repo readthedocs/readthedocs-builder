@@ -79,8 +79,8 @@ def mock_api(requests_mock):
 def prepare_build(monkeypatch, tmp_path, write_config, api_client, mock_api):
     """Run ``_prepare_build`` against the mocked API, with the clone stubbed."""
 
-    def _prepare(project=None, build_os="ubuntu-24.04"):
-        mock_api(project=project)
+    def _prepare(project=None, version=None, build_os="ubuntu-24.04"):
+        mock_api(project=project, version=version)
         config = write_config(
             tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": build_os}}
         )
@@ -213,6 +213,29 @@ def test_prepare_build_fetches_the_pr_refspec_for_external_versions(
         version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"},
     )
     assert refspec == "pull/2109/head:external-2109"
+
+
+@pytest.fixture
+def sync_versions_calls(monkeypatch):
+    """Replace ``_sync_versions`` with a spy and return its captured calls."""
+    calls = []
+    monkeypatch.setattr(tasks, "_sync_versions", lambda **kwargs: calls.append(kwargs))
+    return calls
+
+
+def test_prepare_build_syncs_versions_for_branch_versions(prepare_build, sync_versions_calls):
+    prepare_build(version={"type": "branch", "verbose_name": "main"})
+
+    assert len(sync_versions_calls) == 1
+
+
+def test_prepare_build_skips_syncing_versions_for_external_versions(
+    prepare_build, sync_versions_calls
+):
+    # A PR build can't add or remove tags/branches, so there is nothing to sync.
+    prepare_build(version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"})
+
+    assert sync_versions_calls == []
 
 
 def test_prepare_build_fails_when_the_config_file_is_missing(monkeypatch, api_client, mock_api):
