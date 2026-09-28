@@ -33,3 +33,7 @@ SYNC_VERSIONS_TASK_QUEUE = "web"
 # The only queue this worker consumes; must match ``-Q`` in the systemd unit.
 # NOTE: this should eventually be read from an environment variable.
 RUN_BUILD_TASK_QUEUE = "build:isolated"
+
+# The build task this worker runs; must match ``RTD_BUILD_ISOLATED_TASK_NAME``
+# in readthedocs.org settings.
+RUN_BUILD_TASK_NAME = "worker.tasks.run_build"

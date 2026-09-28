@@ -36,6 +36,7 @@ from builder.entrypoint import run_build as run_builder
 from builder.exceptions import BuildCancelled
 from builder.lsremote import find_duplicate_reserved_versions
 from builder.lsremote import parse_lsremote
+from builder.refspec import EXTERNAL
 from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
@@ -206,7 +207,7 @@ def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
         log.exception("Failed to PATCH build to final state.", build_pk=build_pk, state=state)
 
 
-@app.task(name="worker.tasks.run_build", bind=True, acks_late=True)
+@app.task(name=constants.RUN_BUILD_TASK_NAME, bind=True, acks_late=True)
 def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=False):
     """
     Run a single Read the Docs build.
@@ -487,7 +488,11 @@ def _prepare_build(*, api_client, build, version):
     # Sync tags/branches into the DB (and fail early on a duplicate reserved
     # version). Runs here — before the container — so it can fail the build the
     # way upstream does.
-    _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
+    # SECURITY: never sync versions from external versions (PRs),
+    # since they are not trusted and could fake the output of the commands
+    # to create/delete versions in our database.
+    if version.get("type") != EXTERNAL:
+        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
     return build_os, memory, time_limit_seconds
 
@@ -556,7 +561,7 @@ def _on_run_build_received(sender, request=None, **_):
     ``sender``, and at that point the only prefetch slot is held by this
     message, so cancelling here guarantees nothing else is fetched.
     """
-    if request is None or request.name != "worker.tasks.run_build":
+    if request is None or request.name != constants.RUN_BUILD_TASK_NAME:
         return
 
     log.info("Cancelling queue consumer; this instance runs one build only.")
@@ -578,7 +583,7 @@ def _on_run_build_postrun(sender, kwargs=None, **_):
     is meant to consume; if some other task somehow ended up routed
     here, we don't want to terminate the host as a side effect.
     """
-    if sender is None or sender.name != "worker.tasks.run_build":
+    if sender is None or sender.name != constants.RUN_BUILD_TASK_NAME:
         return
 
     # Always released, even when we skip the terminate below: a protected

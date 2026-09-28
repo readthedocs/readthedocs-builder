@@ -79,8 +79,8 @@ def mock_api(requests_mock):
 def prepare_build(monkeypatch, tmp_path, write_config, api_client, mock_api):
     """Run ``_prepare_build`` against the mocked API, with the clone stubbed."""
 
-    def _prepare(project=None, build_os="ubuntu-24.04"):
-        mock_api(project=project)
+    def _prepare(project=None, version=None, build_os="ubuntu-24.04"):
+        mock_api(project=project, version=version)
         config = write_config(
             tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": build_os}}
         )
@@ -215,6 +215,29 @@ def test_prepare_build_fetches_the_pr_refspec_for_external_versions(
     assert refspec == "pull/2109/head:external-2109"
 
 
+@pytest.fixture
+def sync_versions_calls(monkeypatch):
+    """Replace ``_sync_versions`` with a spy and return its captured calls."""
+    calls = []
+    monkeypatch.setattr(tasks, "_sync_versions", lambda **kwargs: calls.append(kwargs))
+    return calls
+
+
+def test_prepare_build_syncs_versions_for_branch_versions(prepare_build, sync_versions_calls):
+    prepare_build(version={"type": "branch", "verbose_name": "main"})
+
+    assert len(sync_versions_calls) == 1
+
+
+def test_prepare_build_skips_syncing_versions_for_external_versions(
+    prepare_build, sync_versions_calls
+):
+    # A PR build can't add or remove tags/branches, so there is nothing to sync.
+    prepare_build(version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"})
+
+    assert sync_versions_calls == []
+
+
 def test_prepare_build_fails_when_the_config_file_is_missing(monkeypatch, api_client, mock_api):
     mock_api()
     monkeypatch.setattr(tasks, "sparse_clone_yaml", lambda **kwargs: None)
@@ -340,7 +363,7 @@ def test_task_received_cancels_the_queue_consumer(consumer):
     The main process must stop consuming on the first build, or it grabs a
     second one while the instance is already terminating.
     """
-    request = types.SimpleNamespace(name="worker.tasks.run_build")
+    request = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_received(consumer, request=request)
 
@@ -367,7 +390,7 @@ def postrun(monkeypatch):
 
 
 def test_postrun_self_terminates_after_a_build(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
 
@@ -379,7 +402,7 @@ def test_postrun_releases_scale_in_protection_before_terminating(postrun):
     Order matters: TerminateInstanceInAutoScalingGroup refuses to terminate a
     protected instance, which would strand it in the ASG.
     """
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
 
@@ -387,7 +410,7 @@ def test_postrun_releases_scale_in_protection_before_terminating(postrun):
 
 
 def test_postrun_skips_self_terminate_when_asked(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
 
@@ -396,7 +419,7 @@ def test_postrun_skips_self_terminate_when_asked(postrun):
 
 def test_postrun_releases_scale_in_protection_even_when_not_terminating(postrun):
     """A protected instance can't be scaled in either — never leave it set."""
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
 

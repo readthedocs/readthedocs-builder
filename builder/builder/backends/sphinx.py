@@ -15,6 +15,7 @@ from pathlib import Path
 
 import structlog
 
+from builder import binaries
 from builder.base import BaseBuilder
 from builder.constants import OLD_LANGUAGES_CODE_MAPPING
 from builder.constants import PDF_RE
@@ -84,7 +85,7 @@ class BaseSphinx(BaseBuilder):
             )
 
         self.run(
-            "cat",
+            binaries.CAT,
             os.path.relpath(self.config_file, self.project_path),
             cwd=self.project_path,
         )
@@ -176,25 +177,25 @@ class LocalMediaBuilder(BaseSphinx):
 
         # SECURITY CRITICAL: Advisory GHSA-hqwg-gjqw-h5wg.
         # Move the directory into a tmpdir so zip uses the rename as arcname.
-        mktemp = self.run("mktemp", "--directory", record=False)
+        mktemp = self.run(binaries.MKTEMP, "--directory", record=False)
         tmp_dir = Path(mktemp.output.strip())
         dirname = f"{self.project.slug}-{self.version.slug}"
         self.run(
-            "mv",
+            binaries.MV,
             self.absolute_container_output_dir,
             str(tmp_dir / dirname),
             cwd=self.project_path,
             record=False,
         )
         self.run(
-            "mkdir",
+            binaries.MKDIR,
             "--parents",
             self.absolute_container_output_dir,
             cwd=self.project_path,
             record=False,
         )
         self.run(
-            "zip",
+            binaries.ZIP,
             "--recurse-paths",
             "--symlinks",
             target_file,
@@ -221,22 +222,24 @@ class EpubBuilder(BaseSphinx):
             # Only one .epub is supported per version.
             epub_filepath = epub_sphinx_filepaths[0]
 
-            self.run("mv", epub_filepath, temp_epub_file, cwd=self.project_path, record=False)
             self.run(
-                "rm",
+                binaries.MV, epub_filepath, temp_epub_file, cwd=self.project_path, record=False
+            )
+            self.run(
+                binaries.RM,
                 "--recursive",
                 self.absolute_container_output_dir,
                 cwd=self.project_path,
                 record=False,
             )
             self.run(
-                "mkdir",
+                binaries.MKDIR,
                 "--parents",
                 self.absolute_container_output_dir,
                 cwd=self.project_path,
                 record=False,
             )
-            self.run("mv", temp_epub_file, target_file, cwd=self.project_path, record=False)
+            self.run(binaries.MV, temp_epub_file, target_file, cwd=self.project_path, record=False)
 
 
 class LatexBuildCommandMixin:
@@ -321,7 +324,7 @@ class PdfBuilder(BaseSphinx):
         if self.project.language == "ja":
             rcfile = "latexmkjarc"
 
-        self.run("cat", rcfile, cwd=self.absolute_host_output_dir)
+        self.run(binaries.CAT, rcfile, cwd=self.absolute_host_output_dir)
 
         cmd = [
             "latexmk",
@@ -359,24 +362,24 @@ class PdfBuilder(BaseSphinx):
         pdf_sphinx_filepath_host = os.path.join(self.absolute_host_output_dir, self.pdf_file_name)
         if os.path.exists(pdf_sphinx_filepath_host):
             self.run(
-                "mv",
+                binaries.MV,
                 pdf_sphinx_filepath,
                 temp_pdf_file,
                 cwd=self.project_path,
                 record=False,
             )
             self.run(
-                "rm",
+                binaries.RM,
                 "-r",
                 self.absolute_container_output_dir,
                 cwd=self.project_path,
                 record=False,
             )
             self.run(
-                "mkdir",
+                binaries.MKDIR,
                 "-p",
                 self.absolute_container_output_dir,
                 cwd=self.project_path,
                 record=False,
             )
-            self.run("mv", temp_pdf_file, target_file, cwd=self.project_path, record=False)
+            self.run(binaries.MV, temp_pdf_file, target_file, cwd=self.project_path, record=False)
