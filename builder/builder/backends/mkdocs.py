@@ -11,6 +11,7 @@ import os
 
 import structlog
 
+from builder import binaries
 from builder.base import BaseBuilder
 from builder.exceptions import UserFileNotFound
 from builder.python_envs import UvEnv
@@ -43,7 +44,7 @@ class BaseMkdocs(BaseBuilder):
             )
 
         self.run(
-            "cat",
+            binaries.CAT,
             os.path.relpath(self.config_file, self.project_path),
             cwd=self.project_path,
         )

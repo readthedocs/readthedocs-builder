@@ -1,6 +1,8 @@
 import pytest
 from docker.errors import NotFound
 
+from builder import binaries
+
 from worker import docker
 
 
@@ -135,7 +137,7 @@ def test_start_container_idles_as_pid_1(client):
     """
     start_container(client)
 
-    assert client.created["entrypoint"] == ["/bin/sh", "-c", "exec sleep infinity"]
+    assert client.created["entrypoint"] == ["/bin/sh", "-c", f"exec {binaries.SLEEP} infinity"]
 
 
 def test_stop_container_force_removes_it(client):

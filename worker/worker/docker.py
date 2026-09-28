@@ -13,6 +13,8 @@ import docker
 import structlog
 from docker.errors import NotFound
 
+from builder import binaries
+
 
 log = structlog.get_logger(__name__)
 
@@ -91,8 +93,8 @@ def start_healthcheck(client, container, *, url, host_header, delay):
     """
     command = (
         "/bin/bash -c 'while true; do "
-        f'curl --insecure --silent --max-time 2 -H "Host: {host_header}" -X POST {url}'
-        f"; sleep {delay}; done;'"
+        f'{binaries.CURL} --insecure --silent --max-time 2 -H "Host: {host_header}" -X POST {url}'
+        f"; {binaries.SLEEP} {delay}; done;'"
     )
     exec_id = client.exec_create(container=container, cmd=command, stdout=False, stderr=False)
     client.exec_start(exec_id=exec_id["Id"], detach=True)
@@ -121,7 +123,7 @@ def start_container(client, *, build_pk, build_os, memory):
         name=name,
         # ``exec`` so the sleep is PID 1 and receives ``docker kill``'s signal
         # directly rather than through a shell that would ignore it.
-        entrypoint=["/bin/sh", "-c", "exec sleep infinity"],
+        entrypoint=["/bin/sh", "-c", f"exec {binaries.SLEEP} infinity"],
         detach=True,
         host_config=client.create_host_config(
             mem_limit=memory,

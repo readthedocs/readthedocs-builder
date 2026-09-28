@@ -9,10 +9,12 @@ Used by both the worker (host-side sparse clone / ls-remote in
 
 import re
 
+from builder import binaries
+
 
 # Passed as ``GIT_SSH_COMMAND`` so git's ssh runs unattended: no host-key
 # prompt (the clone is non-interactive) and no known_hosts writes.
-GIT_SSH_COMMAND = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+GIT_SSH_COMMAND = f"{binaries.SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 
 # ``ssh-agent -s`` prints shell ``export`` lines, e.g.::

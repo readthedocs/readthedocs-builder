@@ -17,6 +17,7 @@ from unittest import mock
 import pytest
 from conftest import make_builder
 
+from builder import binaries
 from builder.backends.mkdocs import MkdocsHTML
 from builder.backends.sphinx import BaseSphinx
 from builder.backends.sphinx import EpubBuilder
@@ -194,7 +195,7 @@ def test_sphinx_show_conf_cats_the_config_file(docroot):
     patcher, fake = _fake_run(builder)
     with patcher:
         builder.show_conf()
-    assert fake.call_args[0][0] == "cat"
+    assert fake.call_args[0][0] == binaries.CAT
 
 
 def test_sphinx_show_conf_raises_when_the_declared_file_is_missing(docroot):
@@ -275,13 +276,13 @@ def test_localmedia_post_build_zips_from_a_renamed_tmpdir(docroot):
     def fake_run(*args, **kwargs):
         calls.append((args, kwargs))
         # First call is ``mktemp --directory``; hand back a fake temp dir.
-        output = "/tmp/fake-tmpdir" if args[0] == "mktemp" else ""
+        output = "/tmp/fake-tmpdir" if args[0] == binaries.MKTEMP else ""
         return mock.MagicMock(successful=True, output=output)
 
     with mock.patch.object(builder, "run", side_effect=fake_run):
         builder._post_build()
 
-    zip_call = next(c for c in calls if c[0][0] == "zip")
+    zip_call = next(c for c in calls if c[0][0] == binaries.ZIP)
     zip_args, zip_kwargs = zip_call
     assert "pip-latest" in zip_args
     assert zip_kwargs["cwd"] == "/tmp/fake-tmpdir"
@@ -386,7 +387,7 @@ def test_mkdocs_show_conf_cats_the_config_file(docroot):
     patcher, fake = _fake_run(builder)
     with patcher:
         builder.show_conf()
-    assert fake.call_args[0][0] == "cat"
+    assert fake.call_args[0][0] == binaries.CAT
 
 
 # ---------------------------------------------------------------------------
