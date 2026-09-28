@@ -370,6 +370,15 @@ def test_task_received_cancels_the_queue_consumer(consumer):
     assert consumer.cancelled == ["build:isolated"]
 
 
+def test_task_received_keeps_consuming_under_docker_compose(consumer, monkeypatch):
+    monkeypatch.setenv("RTD_DOCKER_COMPOSE", "1")
+    request = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == []
+
+
 def test_task_received_ignores_other_tasks(consumer):
     request = types.SimpleNamespace(name="some.other.task")
 
