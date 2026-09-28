@@ -3,7 +3,6 @@
 import os
 import shlex
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
@@ -89,21 +88,16 @@ def _ssh_agent(ssh_key: str):
     Start an ssh-agent with ``ssh_key`` loaded; yield an env dict for git.
 
     Matches ``readthedocsinc/projects/ssh.py:setup_ssh_agent``: start an
-    ssh-agent, add the private key from a temp file, yield an env carrying the
-    agent's ``SSH_AUTH_SOCK`` (+ a prompt-free ``GIT_SSH_COMMAND``), then tear
-    the agent down and remove the key file. Shared by the SSH sparse clone and
-    the host-side ``lsremote``.
+    ssh-agent, feed the private key to ``ssh-add`` on stdin (it never touches
+    disk), yield an env carrying the agent's ``SSH_AUTH_SOCK`` (+ a prompt-free
+    ``GIT_SSH_COMMAND``), then tear the agent down. Shared by the SSH sparse
+    clone and the host-side ``lsremote``.
     """
     if not ssh_key:
         raise PreContainerFailure(
             BuildUserError.GENERIC,
             log_message="SSH repo but the project has no ssh key set",
         )
-
-    with tempfile.NamedTemporaryFile("w", delete=False, prefix="rtd-ssh-key-") as key_file:
-        key_file.write(ssh_key)
-        key_path = key_file.name
-    os.chmod(key_path, 0o600)
 
     agent_env = {}
     agent_started = False
@@ -125,8 +119,12 @@ def _ssh_agent(ssh_key: str):
         agent_started = True
 
         env = {**os.environ, **agent_env}
+        # ssh-add rejects a key without a trailing newline.
+        key_stdin = ssh_key if ssh_key.endswith("\n") else ssh_key + "\n"
         subprocess.run(
-            [binaries.SSH_ADD, key_path],
+            [binaries.SSH_ADD, "-"],
+            input=key_stdin,
+            text=True,
             check=True,
             capture_output=True,
             env=env,
@@ -136,11 +134,6 @@ def _ssh_agent(ssh_key: str):
         env["GIT_SSH_COMMAND"] = GIT_SSH_COMMAND
         yield env
     finally:
-        # Remove the key file first (regardless of what happens next).
-        try:
-            os.unlink(key_path)
-        except FileNotFoundError:
-            pass
         # Kill the agent if we managed to start it.
         pid = agent_env.get("SSH_AGENT_PID")
         if agent_started and pid:

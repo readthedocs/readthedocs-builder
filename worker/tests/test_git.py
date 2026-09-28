@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 
+from builder import binaries
 from builder.lsremote import parse_lsremote
 from builder.ssh import GIT_SSH_COMMAND
 
@@ -358,3 +359,48 @@ def test_sparse_clone_yaml_dispatches_ssh_repos(tmp_path, write_config):
     agent.assert_called_once_with("PRIVATE-KEY")
     assert run.call_args.kwargs["auth_url"] == "git@github.com:rtd/pip.git"
     assert run.call_args.kwargs["env"] == agent_env
+
+
+# ---------------------------------------------------------------------------
+# _ssh_agent
+# ---------------------------------------------------------------------------
+
+AGENT_OUT = (
+    "SSH_AUTH_SOCK=/tmp/agent.42; export SSH_AUTH_SOCK;\nSSH_AGENT_PID=42; export SSH_AGENT_PID;\n"
+)
+
+
+@pytest.fixture
+def fake_run():
+    """Stub ``subprocess.run`` in ``worker.git``; fakes ``ssh-agent -s`` and records calls."""
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return mock.Mock(stdout=AGENT_OUT if cmd[-1] == "-s" else "")
+
+    with mock.patch("worker.git.subprocess.run", run):
+        yield calls
+
+
+@pytest.mark.parametrize("key", ["PRIVATE-KEY", "PRIVATE-KEY\n"])
+def test_ssh_agent_feeds_the_key_to_ssh_add_on_stdin(fake_run, key):
+    with _ssh_agent(key) as env:
+        pass
+
+    ((cmd, kwargs),) = [call for call in fake_run if call[0][0] == binaries.SSH_ADD]
+    assert cmd == [binaries.SSH_ADD, "-"]
+    # ssh-add needs exactly one trailing newline.
+    assert kwargs["input"] == "PRIVATE-KEY\n"
+    assert kwargs["env"]["SSH_AUTH_SOCK"] == "/tmp/agent.42"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.42"
+    assert env["GIT_SSH_COMMAND"] == GIT_SSH_COMMAND
+
+
+def test_ssh_agent_kills_the_agent_on_exit(fake_run):
+    with _ssh_agent("PRIVATE-KEY"):
+        pass
+
+    cmd, kwargs = fake_run[-1]
+    assert cmd == [binaries.SSH_AGENT, "-k"]
+    assert kwargs["env"]["SSH_AGENT_PID"] == "42"
