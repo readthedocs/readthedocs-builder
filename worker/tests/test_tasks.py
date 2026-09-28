@@ -329,6 +329,33 @@ def test_cancellation_handlers_raise_build_cancelled():
 
 
 @pytest.fixture
+def consumer():
+    """A stand-in for the Celery Consumer that records cancelled queues."""
+    cancelled = []
+    return types.SimpleNamespace(cancel_task_queue=cancelled.append, cancelled=cancelled)
+
+
+def test_task_received_cancels_the_queue_consumer(consumer):
+    """
+    The main process must stop consuming on the first build, or it grabs a
+    second one while the instance is already terminating.
+    """
+    request = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == ["build:isolated"]
+
+
+def test_task_received_ignores_other_tasks(consumer):
+    request = types.SimpleNamespace(name="some.other.task")
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == []
+
+
+@pytest.fixture
 def postrun(monkeypatch):
     """Record the ordered instance-lifecycle calls the postrun handler makes."""
     calls = []
@@ -340,7 +367,7 @@ def postrun(monkeypatch):
 
 
 def test_postrun_self_terminates_after_a_build(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
 
@@ -352,7 +379,7 @@ def test_postrun_releases_scale_in_protection_before_terminating(postrun):
     Order matters: TerminateInstanceInAutoScalingGroup refuses to terminate a
     protected instance, which would strand it in the ASG.
     """
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
 
@@ -360,7 +387,7 @@ def test_postrun_releases_scale_in_protection_before_terminating(postrun):
 
 
 def test_postrun_skips_self_terminate_when_asked(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
 
@@ -369,7 +396,7 @@ def test_postrun_skips_self_terminate_when_asked(postrun):
 
 def test_postrun_releases_scale_in_protection_even_when_not_terminating(postrun):
     """A protected instance can't be scaled in either — never leave it set."""
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
 

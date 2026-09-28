@@ -22,9 +22,11 @@ Ephemeral worker semantics:
   acknowledged at *completion*. If the worker / EC2 instance dies
   mid-build, the broker redelivers to another instance.
 - ``worker_prefetch_multiplier = 1`` — never reserve a second task while
-  one is in flight. With ``--max-tasks-per-child=1`` the worker exits
-  after the first task; this prevents an already-prefetched second
-  task from being abandoned.
+  one is in flight, so an in-flight build is the only thing this worker
+  holds when the instance terminates.
+- ``--max-tasks-per-child=1`` only recycles the pool child; the main
+  process keeps consuming. The ``task_received`` hook in ``worker.tasks``
+  is what stops it after the first build.
 """
 
 import os

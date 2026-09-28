@@ -39,6 +39,7 @@ from builder.lsremote import parse_lsremote
 from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
+from celery.signals import task_received
 
 from worker import constants
 from worker.celery import app
@@ -205,7 +206,7 @@ def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
         log.exception("Failed to PATCH build to final state.", build_pk=build_pk, state=state)
 
 
-@app.task(name="worker.tasks.run_build", bind=True, acks_late=True)
+@app.task(name=constants.RUN_BUILD_TASK_NAME, bind=True, acks_late=True)
 def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=False):
     """
     Run a single Read the Docs build.
@@ -541,6 +542,27 @@ def sync_repository(self, *, project_pk, build_api_key, environment):
         raise
 
 
+@task_received.connect
+def _on_run_build_received(sender, request=None, **_):
+    """
+    Stop consuming the queue as soon as the one build this instance runs arrives.
+
+    ``--max-tasks-per-child=1`` only recycles the pool child; the main process
+    keeps consuming. Once the build finishes and is acked (``acks_late``), the
+    freed prefetch slot lets it grab a second build while the instance is
+    already terminating, and that build dies with it.
+
+    ``task_received`` fires in the main process with the Consumer as
+    ``sender``, and at that point the only prefetch slot is held by this
+    message, so cancelling here guarantees nothing else is fetched.
+    """
+    if request is None or request.name != constants.RUN_BUILD_TASK_NAME:
+        return
+
+    log.info("Cancelling queue consumer; this instance runs one build only.")
+    sender.cancel_task_queue(constants.RUN_BUILD_TASK_QUEUE)
+
+
 @task_postrun.connect
 def _on_run_build_postrun(sender, kwargs=None, **_):
     """
@@ -556,7 +578,7 @@ def _on_run_build_postrun(sender, kwargs=None, **_):
     is meant to consume; if some other task somehow ended up routed
     here, we don't want to terminate the host as a side effect.
     """
-    if sender is None or sender.name != "worker.tasks.run_build":
+    if sender is None or sender.name != constants.RUN_BUILD_TASK_NAME:
         return
 
     # Always released, even when we skip the terminate below: a protected
