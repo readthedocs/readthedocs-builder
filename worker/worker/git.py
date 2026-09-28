@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from builder.ssh import GIT_SSH_COMMAND
 from builder.ssh import parse_ssh_agent_env
 
+from builder import binaries
 from worker import constants
 from worker.config import find_config_file
 from worker.exceptions import BuildAppError
@@ -110,7 +111,7 @@ def _ssh_agent(ssh_key: str):
         # ssh-agent -s prints ``export`` lines. Parse them so we can
         # forward SSH_AUTH_SOCK / SSH_AGENT_PID to git.
         agent_out = subprocess.run(
-            ["ssh-agent", "-s"],
+            [binaries.SSH_AGENT, "-s"],
             check=True,
             capture_output=True,
             text=True,
@@ -125,7 +126,7 @@ def _ssh_agent(ssh_key: str):
 
         env = {**os.environ, **agent_env}
         subprocess.run(
-            ["ssh-add", key_path],
+            [binaries.SSH_ADD, key_path],
             check=True,
             capture_output=True,
             env=env,
@@ -144,7 +145,7 @@ def _ssh_agent(ssh_key: str):
         pid = agent_env.get("SSH_AGENT_PID")
         if agent_started and pid:
             subprocess.run(
-                ["ssh-agent", "-k"],
+                [binaries.SSH_AGENT, "-k"],
                 env={**os.environ, **agent_env},
                 check=False,
                 capture_output=True,
@@ -194,7 +195,7 @@ def lsremote(*, repo_url: str, ssh_key: str, env: dict, include_tags=True, inclu
 
 def _run_lsremote(*, auth_url: str, ref_args: list, env: dict) -> str:
     """Run ``git ls-remote`` under a shell so the token placeholder expands."""
-    cmd = f"git ls-remote {' '.join(ref_args)} {auth_url}"
+    cmd = f"{binaries.GIT} ls-remote {' '.join(ref_args)} {auth_url}"
     result = subprocess.run(
         cmd,
         shell=True,
@@ -235,11 +236,11 @@ def _run_sparse_clone(
     # (cheaply — blob:none, depth 1, no checkout) to set up the partial-clone
     # promisor, then fetch the exact refspec and check out ``FETCH_HEAD``.
     for cmd in (
-        f"git clone --filter=blob:none --no-checkout --depth=1 {auth_url} {dest}",
-        f"git -C {dest} fetch --filter=blob:none --depth=1 origin {shlex.quote(refspec)}",
-        f"git -C {dest} sparse-checkout init --no-cone",
-        f"git -C {dest} sparse-checkout set {files}",
-        f"git -C {dest} checkout FETCH_HEAD",
+        f"{binaries.GIT} clone --filter=blob:none --no-checkout --depth=1 {auth_url} {dest}",
+        f"{binaries.GIT} -C {dest} fetch --filter=blob:none --depth=1 origin {shlex.quote(refspec)}",
+        f"{binaries.GIT} -C {dest} sparse-checkout init --no-cone",
+        f"{binaries.GIT} -C {dest} sparse-checkout set {files}",
+        f"{binaries.GIT} -C {dest} checkout FETCH_HEAD",
     ):
         subprocess.run(
             cmd,

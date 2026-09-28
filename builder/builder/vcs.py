@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from builder import binaries
 from builder.constants import ALL
 from builder.constants import BRANCH
 from builder.constants import TAG
@@ -81,7 +82,7 @@ class Backend:
             # ``runuser`` and owned by the build user.
             # ``cwd="/"`` is just a guaranteed-existing directory to spawn from (the path is absolute).
             self.environment.run(
-                "mkdir",
+                binaries.MKDIR,
                 "--parents",
                 self.working_dir,
                 cwd="/",
@@ -140,7 +141,7 @@ class Backend:
 
     def clone(self):
         """Shallow-clone the repository into the working directory."""
-        cmd = ["git", "clone", "--depth", "1", self.repo_url, "."]
+        cmd = [binaries.CONTAINER_GIT, "clone", "--depth", "1", self.repo_url, "."]
         try:
             return self.run(*cmd)
         except RepositoryError as exc:
@@ -169,7 +170,7 @@ class Backend:
     def fetch(self):
         """Fetch the relevant ref(s) into the working directory."""
         cmd = [
-            "git",
+            binaries.CONTAINER_GIT,
             "fetch",
             "origin",
             "--force",
@@ -215,11 +216,11 @@ class Backend:
             ssh_url = f"git@{parsed.netloc}:{parsed.path.lstrip('/')}"
 
         try:
-            self.run("git", "remote", "add", remote_name, ssh_url, record=False)
+            self.run(binaries.CONTAINER_GIT, "remote", "add", remote_name, ssh_url, record=False)
             code, stdout, stderr = self.run(
-                "timeout",
+                binaries.TIMEOUT,
                 "10s",
-                "git",
+                binaries.CONTAINER_GIT,
                 "push",
                 "--dry-run",
                 remote_name,
@@ -276,7 +277,7 @@ class Backend:
             )
             return False
         finally:
-            self.run("git", "remote", "remove", remote_name, record=False)
+            self.run(binaries.CONTAINER_GIT, "remote", "remove", remote_name, record=False)
 
     # ---- Submodules ----
 
@@ -324,8 +325,8 @@ class Backend:
                 self.checkout_submodules(submodules, config.submodules.recursive)
 
     def checkout_submodules(self, submodules: list[str], recursive: bool):
-        self.run("git", "submodule", "sync")
-        cmd = ["git", "submodule", "update", "--init", "--force"]
+        self.run(binaries.CONTAINER_GIT, "submodule", "sync")
+        cmd = [binaries.CONTAINER_GIT, "submodule", "update", "--init", "--force"]
         if recursive:
             cmd.append("--recursive")
         cmd.append("--")
@@ -341,7 +342,7 @@ class Backend:
         survive parsing. Yields paths only; missing-path entries are skipped.
         """
         exit_code, stdout, _ = self.run(
-            "git",
+            binaries.CONTAINER_GIT,
             "config",
             "--null",
             "--file",
@@ -369,7 +370,7 @@ class Backend:
 
     def checkout_revision(self, revision):
         try:
-            return self.run("git", "checkout", "--force", revision)
+            return self.run(binaries.CONTAINER_GIT, "checkout", "--force", revision)
         except RepositoryError as exc:
             raise RepositoryError(
                 message_id=RepositoryError.FAILED_TO_CHECKOUT,
@@ -400,18 +401,18 @@ class Backend:
 
     def ref_exists(self, ref: str) -> bool:
         exit_code, _, _ = self.run(
-            "git", "show-ref", "--verify", "--quiet", "--", ref, record=False
+            binaries.CONTAINER_GIT, "show-ref", "--verify", "--quiet", "--", ref, record=False
         )
         return exit_code == 0
 
     @property
     def commit(self) -> str:
-        _, stdout, _ = self.run("git", "rev-parse", "HEAD", record=False)
+        _, stdout, _ = self.run(binaries.CONTAINER_GIT, "rev-parse", "HEAD", record=False)
         return stdout.strip()
 
     def get_default_branch(self) -> str:
         """Resolve the remote's default branch via ``git symbolic-ref``."""
-        cmd = ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
+        cmd = [binaries.CONTAINER_GIT, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
         _, stdout, _ = self.run(*cmd, demux=True, record=False)
         return stdout.strip().removeprefix("origin/")
 
@@ -426,7 +427,7 @@ class Backend:
         if include_branches:
             extra_args.append("--heads")
 
-        cmd = ["git", "ls-remote", *extra_args, self.repo_url]
+        cmd = [binaries.CONTAINER_GIT, "ls-remote", *extra_args, self.repo_url]
 
         self.check_working_dir()
         exit_code, stdout, _ = self.run(*cmd, demux=True, record=False)

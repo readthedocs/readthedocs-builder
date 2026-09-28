@@ -28,6 +28,7 @@ import structlog
 from docker.errors import APIError as DockerAPIError
 from slumber.exceptions import HttpNotFoundError
 
+from builder import binaries
 from builder import settings
 from builder.constants import DATA_UPLOAD_MAX_OUTPUT_BYTES
 from builder.constants import RTD_SKIP_BUILD_EXIT_CODE
@@ -200,6 +201,10 @@ class BuildCommand(BuildCommandResultMixin):
         if self.output is not None:
             output = self.output.encode("utf-8")
         return "\n".join([self.get_command(), str(output)])
+
+    @property
+    def is_super_user(self) -> bool:
+        return self.user == settings.RTD_DOCKER_SUPER_USER
 
     def get_command(self) -> str:
         """Flatten ``command`` to a single shell-safe display string."""
@@ -389,7 +394,7 @@ class DockerBuildCommand(BuildCommand):
         other work, matching upstream.
         """
         prefix = ""
-        if self.bin_path:
+        if self.bin_path and not self.is_super_user:
             bin_path = self._escape_command(self.bin_path)
             prefix += f"PATH={bin_path}:$PATH "
 
@@ -397,7 +402,7 @@ class DockerBuildCommand(BuildCommand):
             self._escape_command(part) if self.escape_command else part for part in self.command
         )
 
-        nice = "nice -n 10"
+        nice = f"{binaries.NICE} -n 10"
         if prefix:
             # ``;`` separates the variable assignment from the command as
             # explicitly as a newline would.
@@ -419,7 +424,11 @@ class DockerBuildCommand(BuildCommand):
 
         # PATH is handled in ``get_wrapped_command`` (prepended to the
         # container's own), and HOME/USER come from the container's passwd
-        # entry via ``--user``. Neither is set here.
+        # entry via ``--user``. Super-user execs are the exception: they get
+        # a fixed system PATH instead of the image's user-writable one (see
+        # ``builder.binaries``).
+        if self.is_super_user:
+            environment["PATH"] = binaries.SUPER_USER_PATH
 
         container = self.build_env.container_name
         if not container:
