@@ -1,7 +1,6 @@
 """Sparse clone of a project's config file, over HTTPS or SSH."""
 
 import os
-import shlex
 import subprocess
 import tempfile
 from contextlib import contextmanager
@@ -37,12 +36,8 @@ def sparse_clone_yaml(
 
     Auth:
       - HTTPS repos: the caller puts the token into
-        ``env["READTHEDOCS_GIT_CLONE_TOKEN"]`` and the URL string we
-        build carries the LITERAL text ``$READTHEDOCS_GIT_CLONE_TOKEN``.
-        The shell (``shell=True`` below) expands it at exec time. If
-        git echoes the URL on failure, only the placeholder is
-        visible in logs — the raw token stays out of stderr and
-        argv. Matches ``builder/vcs.py:_get_clone_url``.
+        ``env["READTHEDOCS_GIT_CLONE_TOKEN"]`` and we substitute it into
+        the URL's userinfo. Never log the resulting URL.
       - SSH repos: ``ssh_key`` (from ``/api/v2/project/<pk>/key/``) is
         loaded into a temp ssh-agent, matching
         ``readthedocsinc/projects/ssh.py:setup_ssh_agent``.
@@ -68,19 +63,22 @@ def sparse_clone_yaml(
 def _sparse_clone_yaml_https(
     *, repo_url: str, refspec: str, dest: str, env: dict, yaml_path: str | None = None
 ) -> str | None:
-    """
-    HTTPS sparse clone.
-
-    The URL carries the literal placeholder ``$READTHEDOCS_GIT_CLONE_TOKEN``;
-    the caller sets the real token in ``env`` and the shell (via
-    ``shell=True``) expands it at exec time. For public repos with no
-    token, ``env["READTHEDOCS_GIT_CLONE_TOKEN"]`` is empty, the URL
-    expands to ``https://@host/…``, and git falls back to anonymous.
-    """
-    parsed = urlparse(repo_url)
-    auth_url = f"{parsed.scheme}://$READTHEDOCS_GIT_CLONE_TOKEN@{parsed.netloc}{parsed.path}"
+    """HTTPS sparse clone, authenticated with the clone token from ``env``."""
+    auth_url = _with_clone_token(repo_url, env)
     _run_sparse_clone(auth_url=auth_url, refspec=refspec, dest=dest, env=env, yaml_path=yaml_path)
     return find_config_file(dest, yaml_path=yaml_path)
+
+
+def _with_clone_token(repo_url: str, env: dict) -> str:
+    """
+    Put ``env["READTHEDOCS_GIT_CLONE_TOKEN"]`` into the URL's userinfo.
+
+    For public repos the token is empty, the URL becomes ``https://@host/…``
+    and git falls back to anonymous access. Never log the result.
+    """
+    parsed = urlparse(repo_url)
+    token = env.get("READTHEDOCS_GIT_CLONE_TOKEN", "")
+    return f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
 
 
 @contextmanager
@@ -168,10 +166,9 @@ def lsremote(*, repo_url: str, ssh_key: str, env: dict, include_tags=True, inclu
     Run ``git ls-remote`` host-side and return its stdout.
 
     Used by the worker before the build to sync tags/branches. Auth mirrors
-    :func:`sparse_clone_yaml`: an HTTPS URL carrying the
-    ``$READTHEDOCS_GIT_CLONE_TOKEN`` placeholder (expanded by the shell from
-    ``env``), or an ssh-agent for SSH repos. Returns ``""`` when neither tags
-    nor branches are requested.
+    :func:`sparse_clone_yaml`: the clone token from ``env`` in the HTTPS URL,
+    or an ssh-agent for SSH repos. Returns ``""`` when neither tags nor
+    branches are requested.
     """
     if not repo_url:
         raise PreContainerFailure(BuildUserError.GENERIC, log_message="Empty repo_url")
@@ -188,17 +185,14 @@ def lsremote(*, repo_url: str, ssh_key: str, env: dict, include_tags=True, inclu
         with _ssh_agent(ssh_key) as agent_env:
             return _run_lsremote(auth_url=repo_url, ref_args=ref_args, env=agent_env)
 
-    parsed = urlparse(repo_url)
-    auth_url = f"{parsed.scheme}://$READTHEDOCS_GIT_CLONE_TOKEN@{parsed.netloc}{parsed.path}"
+    auth_url = _with_clone_token(repo_url, env)
     return _run_lsremote(auth_url=auth_url, ref_args=ref_args, env=env)
 
 
 def _run_lsremote(*, auth_url: str, ref_args: list, env: dict) -> str:
-    """Run ``git ls-remote`` under a shell so the token placeholder expands."""
-    cmd = f"{binaries.GIT} ls-remote {' '.join(ref_args)} {auth_url}"
+    """Run ``git ls-remote`` and return its stdout."""
     result = subprocess.run(
-        cmd,
-        shell=True,
+        [binaries.GIT, "ls-remote", *ref_args, "--", auth_url],
         check=True,
         capture_output=True,
         text=True,
@@ -217,34 +211,37 @@ def _run_sparse_clone(
     yaml_path: str | None = None,
 ) -> None:
     """
-    The four git commands that make up a config-file-only clone.
+    The git commands that make up a config-file-only clone.
 
-    Runs with ``shell=True`` so ``$READTHEDOCS_GIT_CLONE_TOKEN`` in
-    ``auth_url`` expands against ``env`` when the caller is the HTTPS
-    path. Same shape works for SSH (no ``$`` in the URL, auth comes
-    from ``SSH_AUTH_SOCK`` in ``env``). Matches the shell-based
-    invocation pattern used in ``readthedocs.doc_builder.environments``.
+    No shell: ``auth_url``, ``refspec`` and ``yaml_path`` are user-controlled
+    and this runs on the HOST, outside the build container. HTTPS auth is the
+    token already in ``auth_url``; SSH auth is ``SSH_AUTH_SOCK`` in ``env``.
     """
-    # shlex.quote: ``yaml_path`` and ``refspec`` are user-controlled (a project
-    # setting / branch / PR number) and this runs under ``shell=True`` on the
-    # HOST, outside the build container.
-    paths = (yaml_path,) if yaml_path else constants.CONFIG_FILENAMES
-    files = " ".join(shlex.quote(path) for path in paths)
+    paths = [yaml_path] if yaml_path else list(constants.CONFIG_FILENAMES)
     # Fetch-based rather than ``git clone -b <ref>``: ``-b`` only accepts a
     # branch/tag *name*, but for tags and external (PR/MR) versions the ref is
     # a commit hash or a ``pull/<id>/head`` refspec. We clone the default branch
     # (cheaply — blob:none, depth 1, no checkout) to set up the partial-clone
     # promisor, then fetch the exact refspec and check out ``FETCH_HEAD``.
+    git = [binaries.GIT, "-C", dest]
     for cmd in (
-        f"{binaries.GIT} clone --filter=blob:none --no-checkout --depth=1 {auth_url} {dest}",
-        f"{binaries.GIT} -C {dest} fetch --filter=blob:none --depth=1 origin {shlex.quote(refspec)}",
-        f"{binaries.GIT} -C {dest} sparse-checkout init --no-cone",
-        f"{binaries.GIT} -C {dest} sparse-checkout set {files}",
-        f"{binaries.GIT} -C {dest} checkout FETCH_HEAD",
+        [
+            binaries.GIT,
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--depth=1",
+            "--",
+            auth_url,
+            dest,
+        ],
+        [*git, "fetch", "--filter=blob:none", "--depth=1", "origin", "--", refspec],
+        [*git, "sparse-checkout", "init", "--no-cone"],
+        [*git, "sparse-checkout", "set", "--", *paths],
+        [*git, "checkout", "FETCH_HEAD"],
     ):
         subprocess.run(
             cmd,
-            shell=True,
             check=True,
             capture_output=True,
             env=env,
