@@ -36,6 +36,7 @@ from builder.entrypoint import run_build as run_builder
 from builder.exceptions import BuildCancelled
 from builder.lsremote import find_duplicate_reserved_versions
 from builder.lsremote import parse_lsremote
+from builder.refspec import EXTERNAL
 from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
@@ -487,7 +488,11 @@ def _prepare_build(*, api_client, build, version):
     # Sync tags/branches into the DB (and fail early on a duplicate reserved
     # version). Runs here — before the container — so it can fail the build the
     # way upstream does.
-    _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
+    # SECURITY: never sync versions from external versions (PRs),
+    # since they are not trusted and could fake the output of the commands
+    # to create/delete versions in our database.
+    if version.get("type") != EXTERNAL:
+        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
     return build_os, memory, time_limit_seconds
 
