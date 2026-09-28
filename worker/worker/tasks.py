@@ -36,7 +36,8 @@ from builder.entrypoint import run_build as run_builder
 from builder.exceptions import BuildCancelled
 from builder.lsremote import find_duplicate_reserved_versions
 from builder.lsremote import parse_lsremote
-from builder.refspec import EXTERNAL, get_remote_fetch_refspec
+from builder.refspec import EXTERNAL
+from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
 from celery.signals import task_received
