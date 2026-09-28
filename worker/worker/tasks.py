@@ -564,6 +564,10 @@ def _on_run_build_received(sender, request=None, **_):
     if request is None or request.name != constants.RUN_BUILD_TASK_NAME:
         return
 
+    # Dev: no instance to terminate, so keep consuming.
+    if os.environ.get("RTD_DOCKER_COMPOSE"):
+        return
+
     log.info("Cancelling queue consumer; this instance runs one build only.")
     sender.cancel_task_queue(constants.RUN_BUILD_TASK_QUEUE)
 
