@@ -93,23 +93,45 @@ def test_sparse_clone_does_not_fetch_the_whole_repo(origin, tmp_path):
     assert files == {".readthedocs.yaml", "subpath/docs/.readthedocs.yaml"}
 
 
-def test_sparse_clone_quotes_the_yaml_path_against_shell_injection(origin, tmp_path):
+def test_sparse_clone_does_not_run_shell_code_in_the_yaml_path(origin, tmp_path):
     """
     ``yaml_path`` is user-controlled (``Project.readthedocs_yaml_path``) and the
-    clone runs under ``shell=True`` on the host, outside the build container.
+    clone runs on the host, outside the build container.
 
     This value passes readthedocs.org's ``validate_build_config_file``: no
     leading/trailing '/', no '..', none of ``[]{}()`'"\\%&<>|,`` and it ends
     with '/.readthedocs.yaml'.
 
-    Quoted, git just receives a sparse-checkout pattern that matches nothing —
-    the clone succeeds and the injected command never runs.
+    Git just receives a sparse-checkout pattern that matches nothing — the
+    clone succeeds and the injected command never runs.
     """
     dest = tmp_path / "dest"
     marker = tmp_path / "pwned"
     evil = f"a;touch {marker};b/.readthedocs.yaml"
 
     clone(origin, dest, yaml_path=evil)
+
+    assert not marker.exists()
+
+
+def test_sparse_clone_does_not_run_shell_code_in_the_repo_url(origin, tmp_path):
+    # ``Project.repo`` is user-controlled and upstream only rejects ``&&`` and ``|``.
+    dest = tmp_path / "dest"
+    marker = tmp_path / "pwned"
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_sparse_clone(
+            auth_url=f"{origin};touch {marker}", refspec="main", dest=str(dest), env={**os.environ}
+        )
+
+    assert not marker.exists()
+
+
+def test_run_lsremote_does_not_run_shell_code_in_the_repo_url(origin, tmp_path):
+    marker = tmp_path / "pwned"
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_lsremote(auth_url=f"{origin};touch {marker}", ref_args=["--heads"], env={**os.environ})
 
     assert not marker.exists()
 
@@ -171,14 +193,7 @@ def test_sparse_clone_yaml_requires_an_ssh_key_for_ssh_repos(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_https_clone_keeps_the_token_out_of_the_command(tmp_path):
-    """
-    The URL must carry the LITERAL ``$READTHEDOCS_GIT_CLONE_TOKEN`` placeholder.
-
-    The real token only ever reaches git through the environment, expanded by
-    the shell at exec time, so it can't leak into argv or into git's stderr if
-    the clone fails.
-    """
+def test_https_clone_puts_the_token_in_the_url(tmp_path):
     env = {"READTHEDOCS_GIT_CLONE_TOKEN": "s3cr3t-token"}
 
     with mock.patch("worker.git._run_sparse_clone") as run:
@@ -190,12 +205,19 @@ def test_https_clone_keeps_the_token_out_of_the_command(tmp_path):
         )
 
     auth_url = run.call_args.kwargs["auth_url"]
-    assert auth_url == (
-        "https://$READTHEDOCS_GIT_CLONE_TOKEN@github.com/readthedocs/readthedocs.org.git"
-    )
-    assert "s3cr3t-token" not in auth_url
-    # The token travels in the environment instead.
-    assert run.call_args.kwargs["env"] == env
+    assert auth_url == "https://s3cr3t-token@github.com/readthedocs/readthedocs.org.git"
+
+
+def test_https_clone_drops_query_and_fragment_from_the_url(tmp_path):
+    with mock.patch("worker.git._run_sparse_clone") as run:
+        _sparse_clone_yaml_https(
+            repo_url="https://github.com/rtd/pip.git?x=1#frag",
+            refspec="main",
+            dest=str(tmp_path),
+            env={},
+        )
+
+    assert run.call_args.kwargs["auth_url"] == "https://@github.com/rtd/pip.git"
 
 
 def test_https_clone_forwards_refspec_dest_and_yaml_path(tmp_path):
@@ -209,7 +231,7 @@ def test_https_clone_forwards_refspec_dest_and_yaml_path(tmp_path):
         )
 
     kwargs = run.call_args.kwargs
-    assert kwargs["auth_url"] == "https://$READTHEDOCS_GIT_CLONE_TOKEN@gitlab.com/group/project"
+    assert kwargs["auth_url"] == "https://@gitlab.com/group/project"
     assert kwargs["refspec"] == "refs/tags/v1:refs/tags/v1"
     assert kwargs["dest"] == str(tmp_path)
     assert kwargs["yaml_path"] == "docs/.readthedocs.yaml"
@@ -283,7 +305,7 @@ def test_lsremote_selects_the_requested_refs(kwargs, expected):
     assert run.call_args.kwargs["ref_args"] == expected
 
 
-def test_lsremote_over_https_uses_the_token_placeholder():
+def test_lsremote_over_https_puts_the_token_in_the_url():
     env = {"READTHEDOCS_GIT_CLONE_TOKEN": "s3cr3t-token"}
 
     with mock.patch("worker.git._run_lsremote", return_value="out") as run:
@@ -293,10 +315,7 @@ def test_lsremote_over_https_uses_the_token_placeholder():
 
     assert result == "out"
     auth_url = run.call_args.kwargs["auth_url"]
-    assert auth_url == (
-        "https://$READTHEDOCS_GIT_CLONE_TOKEN@github.com/readthedocs/readthedocs.org.git"
-    )
-    assert "s3cr3t-token" not in auth_url
+    assert auth_url == "https://s3cr3t-token@github.com/readthedocs/readthedocs.org.git"
 
 
 def test_lsremote_over_ssh_runs_inside_an_agent():
@@ -333,7 +352,7 @@ def test_sparse_clone_yaml_dispatches_https_repos(tmp_path, write_config):
         )
 
     assert found == str(tmp_path / ".readthedocs.yaml")
-    assert run.call_args.kwargs["auth_url"].startswith("https://$READTHEDOCS_GIT_CLONE_TOKEN@")
+    assert run.call_args.kwargs["auth_url"] == "https://@github.com/rtd/pip.git"
 
 
 def test_sparse_clone_yaml_dispatches_ssh_repos(tmp_path, write_config):
