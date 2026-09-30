@@ -524,7 +524,7 @@ def test_validate_artifacts_leaves_an_already_named_file_alone(docroot):
 # ---------------------------------------------------------------------------
 
 
-def test_compute_directory_size_logs_the_size_in_bytes(tmp_path):
+def test_compute_directory_size_logs_the_size_in_megabytes(tmp_path):
     runner = Runner(make_director().data)
     (tmp_path / "big.bin").write_bytes(b"\0" * 3 * 1024 * 1024)
 
@@ -533,8 +533,8 @@ def test_compute_directory_size_logs_the_size_in_bytes(tmp_path):
 
     kwargs = log.info.call_args.kwargs
     assert kwargs["media_type"] == "html"
-    # ``du --bytes`` adds the directory's own size.
-    assert kwargs["size"] >= 3 * 1024 * 1024
+    # ``du -m`` rounds up to whole megabytes, and adds the directory's own blocks.
+    assert kwargs["size_mb"] >= 3
 
 
 def test_compute_directory_size_never_raises(tmp_path):
@@ -561,8 +561,8 @@ def test_check_media_size_warns_and_attaches_a_notification(docroot):
     runner = Runner(make_director().data)
     runner.director = mock.MagicMock()
 
-    # Default limit is 1 GB; the notification shows both values in MB.
-    runner._check_media_size(2 * 1024 * 1024 * 1024, "html")
+    # Default limit is 1 GB in bytes; the size and the notification are in MB.
+    runner._check_media_size(2048, "html")
 
     kwargs = runner.director.attach_notification.call_args.kwargs
     assert kwargs["attached_to"] == "build/1"
@@ -574,7 +574,7 @@ def test_check_media_size_respects_the_project_override(docroot):
     runner = Runner(make_director(project={"max_build_media_size": 4 * 1024 * 1024 * 1024}).data)
     runner.director = mock.MagicMock()
 
-    runner._check_media_size(2 * 1024 * 1024 * 1024, "html")
+    runner._check_media_size(2048, "html")
 
     runner.director.attach_notification.assert_not_called()
 

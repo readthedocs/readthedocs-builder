@@ -518,19 +518,19 @@ class Runner:
         """
         Compute and log the size of an artifact directory before uploading it.
 
-        Returns the size in bytes, or ``None`` if it couldn't be computed.
+        Returns the size in megabytes, or ``None`` if it couldn't be computed.
         """
         try:
             output = subprocess.check_output(["du", "--summarize", "-m", "--", directory])
             # The output is something like: "5\t/path/to/directory".
-            directory_size = int(output.decode().split()[0])
+            size_mb = int(output.decode().split()[0])
             log.info(
-                "Build artifacts directory size.",
+                "Build artifacts directory size in megabytes.",
                 directory=directory,
-                size=directory_size,  # Size in bytes
+                size_mb=size_mb,
                 media_type=media_type,
             )
-            return directory_size
+            return size_mb
         except Exception:
             log.info(
                 "Error getting build artifacts directory size.",
@@ -538,33 +538,34 @@ class Runner:
             )
             return None
 
-    def _check_media_size(self, size, media_type):
+    def _check_media_size(self, size_mb, media_type):
         """
         Warn when an artifact directory exceeds the size limit.
 
         Warning-only for now: the upload proceeds, but a warning notification
-        is attached to the build. ``size`` and the limit are in bytes.
+        is attached to the build. ``size_mb`` is in megabytes; the limit is
+        configured in bytes.
         """
-        if size is None:
+        if size_mb is None:
             return
         limit = self.data.project.max_build_media_size or settings.RTD_BUILD_MEDIA_MAX_SIZE
-        if size <= limit:
+        limit_mb = limit // (1024 * 1024)
+        if size_mb <= limit_mb:
             return
         log.warning(
-            "Build artifacts size exceeds the limit.",
+            "Build artifacts size exceeds the limit in megabytes.",
             media_type=media_type,
-            size=size,  # Size in bytes
-            limit=limit,  # Size in bytes
+            size_mb=size_mb,
+            limit_mb=limit_mb,
         )
         try:
-            # The notification message shows both values in MB.
             self.director.attach_notification(
                 attached_to=f"build/{self.data.build['id']}",
                 message_id=MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED,
                 format_values={
                     "media_type": media_type,
-                    "size": size // (1024 * 1024),
-                    "limit": limit // (1024 * 1024),
+                    "size": size_mb,
+                    "limit": limit_mb,
                 },
                 dismissable=True,
             )
