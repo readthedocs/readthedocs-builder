@@ -5,7 +5,7 @@ description = "Read the Docs build runner. Executes build commands inside a buil
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "boto3>=1.43",
+    "boto3>=1.43.95",
     # ``docker exec`` into the build container the worker started
     # (builder/environments.py). Low-level APIClient, same as upstream.
     "docker>=7.1",
