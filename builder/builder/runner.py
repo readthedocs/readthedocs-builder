@@ -517,16 +517,16 @@ class Runner:
         """
         Compute and log the size of an artifact directory before uploading it.
 
-        Returns the size in megabytes, or ``None`` if it couldn't be computed.
+        Returns the size in bytes, or ``None`` if it couldn't be computed.
         """
         try:
-            output = subprocess.check_output(["du", "--summarize", "-m", "--", directory])
-            # The output is something like: "5\t/path/to/directory".
+            output = subprocess.check_output(["du", "--summarize", "--bytes", "--", directory])
+            # The output is something like: "5242880\t/path/to/directory".
             directory_size = int(output.decode().split()[0])
             log.info(
                 "Build artifacts directory size.",
                 directory=directory,
-                size=directory_size,  # Size in mega bytes
+                size=directory_size,  # Size in bytes
                 media_type=media_type,
             )
             return directory_size
@@ -542,7 +542,7 @@ class Runner:
         Warn when an artifact directory exceeds the size limit.
 
         Warning-only for now: the upload proceeds, but a warning notification
-        is attached to the build. ``size`` and the limit are in megabytes.
+        is attached to the build. ``size`` and the limit are in bytes.
         """
         if size is None:
             return
@@ -552,17 +552,18 @@ class Runner:
         log.warning(
             "Build artifacts size exceeds the limit.",
             media_type=media_type,
-            size=size,  # Size in mega bytes
-            limit=limit,  # Size in mega bytes
+            size=size,  # Size in bytes
+            limit=limit,  # Size in bytes
         )
         try:
+            # The notification message shows both values in MB.
             self.director.attach_notification(
                 attached_to=f"build/{self.data.build['id']}",
                 message_id=MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED,
                 format_values={
                     "media_type": media_type,
-                    "size": size,
-                    "limit": limit,
+                    "size": size // (1024 * 1024),
+                    "limit": limit // (1024 * 1024),
                 },
                 dismissable=True,
             )
