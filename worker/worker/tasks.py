@@ -28,6 +28,7 @@ import tempfile
 
 import structlog
 from builder.api_client import get_build
+from builder.api_client import get_project
 from builder.api_client import get_project_ssh_key
 from builder.api_client import get_version
 from builder.api_client import setup_api
@@ -35,9 +36,11 @@ from builder.entrypoint import run_build as run_builder
 from builder.exceptions import BuildCancelled
 from builder.lsremote import find_duplicate_reserved_versions
 from builder.lsremote import parse_lsremote
+from builder.refspec import EXTERNAL
 from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
+from celery.signals import task_received
 
 from worker import constants
 from worker.celery import app
@@ -102,7 +105,8 @@ def _time_limit(seconds):
         signal.alarm(0)
 
 
-def _install_cancellation_handlers():
+@contextlib.contextmanager
+def _cancellation_handlers():
     """
     Turn SIGINT/SIGTERM into :class:`BuildCancelled` for the whole task.
 
@@ -111,14 +115,24 @@ def _install_cancellation_handlers():
     installs its own (upload-aware) handlers. Without this it would surface as
     a bare ``KeyboardInterrupt`` and the build would be reported as a plain
     failure, with no cancellation notification.
+
+    The previous handlers are restored on exit. Leaving them installed
+    would log a false "Cancellation signal received." on every build when
+    Celery recycle SIGTERM after the task due to ``--max-tasks-per-child=1``.
     """
 
     def _on_cancel(signum, frame):
         log.warning("Cancellation signal received.", signal=signum)
         raise BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
 
-    signal.signal(signal.SIGINT, _on_cancel)
-    signal.signal(signal.SIGTERM, _on_cancel)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    for sig in previous:
+        signal.signal(sig, _on_cancel)
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def _to_bool(raw) -> bool:
@@ -204,7 +218,7 @@ def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
         log.exception("Failed to PATCH build to final state.", build_pk=build_pk, state=state)
 
 
-@app.task(name="worker.tasks.run_build", bind=True, acks_late=True)
+@app.task(name=constants.RUN_BUILD_TASK_NAME, bind=True, acks_late=True)
 def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=False):
     """
     Run a single Read the Docs build.
@@ -249,74 +263,73 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
 
     # Installed here rather than in the runner: a cancellation can arrive while
     # the bootstrap below is still running.
-    _install_cancellation_handlers()
-
-    try:
-        build, version = _fetch_build(api_client, build_pk)
-        build_os, memory, time_limit_seconds = _prepare_build(
-            api_client=api_client,
-            build=build,
-            version=version,
-        )
-    except BuildCancelled:
-        _cancel_build(api_client, build_pk)
-        return
-    except Exception as exc:
-        _fail_build(api_client, build_pk, exc)
-        return
-
-    structlog.contextvars.bind_contextvars(build_os=build_os)
-    log.info(
-        "Running build.",
-        memory=memory,
-        time_limit=time_limit_seconds,
-    )
-
-    # One client for the whole build: the worker starts and stops the
-    # container with it, and the runner execs into it with the same one.
-    docker_client = get_client()
-
-    try:
+    with _cancellation_handlers():
         try:
-            container = start_container(
-                docker_client, build_pk=build_pk, build_os=build_os, memory=memory
+            build, version = _fetch_build(api_client, build_pk)
+            build_os, memory, time_limit_seconds = _prepare_build(
+                api_client=api_client,
+                build=build,
+                version=version,
             )
         except BuildCancelled:
             _cancel_build(api_client, build_pk)
             return
         except Exception as exc:
-            # The container never came up, so the runner can't report anything.
             _fail_build(api_client, build_pk, exc)
             return
 
-        _start_healthcheck(docker_client, container, environment, build_pk)
+        structlog.contextvars.bind_contextvars(build_os=build_os)
+        log.info(
+            "Running build.",
+            memory=memory,
+            time_limit=time_limit_seconds,
+        )
 
-        with _time_limit(time_limit_seconds):
-            run_builder(
-                api_client=api_client,
-                docker_client=docker_client,
-                build=build,
-                version=version,
-                container_name=container,
-                production_domain=production_domain,
-                allow_private_repos=_to_bool(environment.get("RTD_ALLOW_PRIVATE_REPOS")),
-                s3_endpoint_url=environment.get("AWS_S3_ENDPOINT_URL") or None,
-            )
-    except BuildCancelled:
-        # Cancelled between the container starting and the runner installing its
-        # own handlers; from there on the runner reports its own cancellation.
-        _cancel_build(api_client, build_pk)
-    except SoftTimeLimitExceeded:
-        # The flat ceiling in worker.celery, hit by a project whose
-        # container_time_limit is above it. The runner never got to finalize the
-        # Build, so do it here. Returning normally keeps task_postrun firing, so
-        # the instance still self-terminates.
-        log.warning("Task soft time limit exceeded.")
-        _fail_build(api_client, build_pk, PreContainerFailure(BuildUserError.BUILD_TIME_OUT))
-    finally:
-        # The container outlives the runner by design — nothing else reads it,
-        # and leaving it behind would strand the instance's memory budget.
-        stop_container(docker_client, build_pk)
+        # One client for the whole build: the worker starts and stops the
+        # container with it, and the runner execs into it with the same one.
+        docker_client = get_client()
+
+        try:
+            try:
+                container = start_container(
+                    docker_client, build_pk=build_pk, build_os=build_os, memory=memory
+                )
+            except BuildCancelled:
+                _cancel_build(api_client, build_pk)
+                return
+            except Exception as exc:
+                # The container never came up, so the runner can't report anything.
+                _fail_build(api_client, build_pk, exc)
+                return
+
+            _start_healthcheck(docker_client, container, environment, build_pk)
+
+            with _time_limit(time_limit_seconds):
+                run_builder(
+                    api_client=api_client,
+                    docker_client=docker_client,
+                    build=build,
+                    version=version,
+                    container_name=container,
+                    production_domain=production_domain,
+                    allow_private_repos=_to_bool(environment.get("RTD_ALLOW_PRIVATE_REPOS")),
+                    s3_endpoint_url=environment.get("AWS_S3_ENDPOINT_URL") or None,
+                )
+        except BuildCancelled:
+            # Cancelled between the container starting and the runner installing its
+            # own handlers; from there on the runner reports its own cancellation.
+            _cancel_build(api_client, build_pk)
+        except SoftTimeLimitExceeded:
+            # The flat ceiling in worker.celery, hit by a project whose
+            # container_time_limit is above it. The runner never got to finalize the
+            # Build, so do it here. Returning normally keeps task_postrun firing, so
+            # the instance still self-terminates.
+            log.warning("Task soft time limit exceeded.")
+            _fail_build(api_client, build_pk, PreContainerFailure(BuildUserError.BUILD_TIME_OUT))
+        finally:
+            # The container outlives the runner by design — nothing else reads it,
+            # and leaving it behind would strand the instance's memory budget.
+            stop_container(docker_client, build_pk)
 
 
 def _sync_versions(*, project, repo_url, ssh_key, git_env):
@@ -382,6 +395,11 @@ def _fetch_build(api_client, build_pk):
             BuildAppError.GENERIC_WITH_BUILD_ID,
             log_message=f"Build {build_pk} not found via API.",
         )
+
+    # Check for builds that were cancelled in the DB while queued in Redis.
+    if build.get("state") == "cancelled":
+        log.info("Build already cancelled. Skipping.", build_pk=build_pk)
+        raise BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
 
     version_pk = build.get("version")
     if not version_pk:
@@ -480,9 +498,88 @@ def _prepare_build(*, api_client, build, version):
     # Sync tags/branches into the DB (and fail early on a duplicate reserved
     # version). Runs here — before the container — so it can fail the build the
     # way upstream does.
-    _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
+    # SECURITY: never sync versions from external versions (PRs),
+    # since they are not trusted and could fake the output of the commands
+    # to create/delete versions in our database.
+    if version.get("type") != EXTERNAL:
+        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
     return build_os, memory, time_limit_seconds
+
+
+# ``git ls-remote`` is one network round trip; the app-level default
+# (``RTD_BUILDS_TASK_TIME_LIMIT``, 2h) is sized for builds, not for this.
+SYNC_REPOSITORY_TIME_LIMIT = 120
+
+
+@app.task(
+    name="worker.tasks.sync_repository",
+    bind=True,
+    acks_late=True,
+    soft_time_limit=SYNC_REPOSITORY_TIME_LIMIT,
+    time_limit=int(SYNC_REPOSITORY_TIME_LIMIT * 1.2),
+)
+def sync_repository(self, *, project_pk, build_api_key, environment):
+    """
+    Reconcile a project's tags/branches into the database, without a build.
+
+    Unlike ``run_build`` this must NOT self-terminate the instance -- one
+    ``ls-remote`` is not worth an EC2 lifecycle.
+    """
+    structlog.contextvars.bind_contextvars(project_pk=project_pk)
+    log.info("Received sync_repository task.")
+
+    api_client = setup_api(
+        api_url=environment["RTD_API_URL"],
+        build_api_key=build_api_key,
+        production_domain=environment["RTD_PRODUCTION_DOMAIN"],
+    )
+
+    project = get_project(api_client, project_pk)
+    structlog.contextvars.bind_contextvars(project_slug=project.get("slug"))
+
+    repo_url = project.get("repo") or ""
+    ssh_key = ""
+    if repo_url.startswith("git@") or repo_url.startswith("ssh://"):
+        ssh_key = get_project_ssh_key(api_client, project_pk)
+
+    git_env = {
+        **os.environ,
+        "READTHEDOCS_GIT_CLONE_TOKEN": project.get("clone_token") or "",
+    }
+
+    try:
+        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
+    except PreContainerFailure as exc:
+        # There is no Build to attach a notification to, so the task failing is
+        # the only signal we get. Duplicated reserved versions land here.
+        log.warning("Version sync failed.", error=str(exc))
+        raise
+
+
+@task_received.connect
+def _on_run_build_received(sender, request=None, **_):
+    """
+    Stop consuming the queue as soon as the one build this instance runs arrives.
+
+    ``--max-tasks-per-child=1`` only recycles the pool child; the main process
+    keeps consuming. Once the build finishes and is acked (``acks_late``), the
+    freed prefetch slot lets it grab a second build while the instance is
+    already terminating, and that build dies with it.
+
+    ``task_received`` fires in the main process with the Consumer as
+    ``sender``, and at that point the only prefetch slot is held by this
+    message, so cancelling here guarantees nothing else is fetched.
+    """
+    if request is None or request.name != constants.RUN_BUILD_TASK_NAME:
+        return
+
+    # Dev: no instance to terminate, so keep consuming.
+    if os.environ.get("RTD_DOCKER_COMPOSE"):
+        return
+
+    log.info("Cancelling queue consumer; this instance runs one build only.")
+    sender.cancel_task_queue(constants.RUN_BUILD_TASK_QUEUE)
 
 
 @task_postrun.connect
@@ -500,7 +597,7 @@ def _on_run_build_postrun(sender, kwargs=None, **_):
     is meant to consume; if some other task somehow ended up routed
     here, we don't want to terminate the host as a side effect.
     """
-    if sender is None or sender.name != "worker.tasks.run_build":
+    if sender is None or sender.name != constants.RUN_BUILD_TASK_NAME:
         return
 
     # Always released, even when we skip the terminate below: a protected

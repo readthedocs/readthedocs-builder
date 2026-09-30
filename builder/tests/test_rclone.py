@@ -14,6 +14,7 @@ from unittest import mock
 
 import pytest
 
+from builder import binaries
 from builder.rclone import BaseRClone
 from builder.rclone import RCloneS3Remote
 from builder.rclone import _safe_join
@@ -100,7 +101,7 @@ def test_execute_builds_the_command():
         remote.execute("sync", args=["src", ":s3:bucket/dst"], options=["--dry-run"])
 
     command = run.call_args[0][0]
-    assert command[0] == "rclone"
+    assert command[0] == binaries.RCLONE
     assert command[1] == "sync"
     # default options, then extra options, then a ``--`` separator, then args.
     assert "--dry-run" in command

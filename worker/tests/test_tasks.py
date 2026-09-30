@@ -79,8 +79,8 @@ def mock_api(requests_mock):
 def prepare_build(monkeypatch, tmp_path, write_config, api_client, mock_api):
     """Run ``_prepare_build`` against the mocked API, with the clone stubbed."""
 
-    def _prepare(project=None, build_os="ubuntu-24.04"):
-        mock_api(project=project)
+    def _prepare(project=None, version=None, build_os="ubuntu-24.04"):
+        mock_api(project=project, version=version)
         config = write_config(
             tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": build_os}}
         )
@@ -215,6 +215,29 @@ def test_prepare_build_fetches_the_pr_refspec_for_external_versions(
     assert refspec == "pull/2109/head:external-2109"
 
 
+@pytest.fixture
+def sync_versions_calls(monkeypatch):
+    """Replace ``_sync_versions`` with a spy and return its captured calls."""
+    calls = []
+    monkeypatch.setattr(tasks, "_sync_versions", lambda **kwargs: calls.append(kwargs))
+    return calls
+
+
+def test_prepare_build_syncs_versions_for_branch_versions(prepare_build, sync_versions_calls):
+    prepare_build(version={"type": "branch", "verbose_name": "main"})
+
+    assert len(sync_versions_calls) == 1
+
+
+def test_prepare_build_skips_syncing_versions_for_external_versions(
+    prepare_build, sync_versions_calls
+):
+    # A PR build can't add or remove tags/branches, so there is nothing to sync.
+    prepare_build(version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"})
+
+    assert sync_versions_calls == []
+
+
 def test_prepare_build_fails_when_the_config_file_is_missing(monkeypatch, api_client, mock_api):
     mock_api()
     monkeypatch.setattr(tasks, "sparse_clone_yaml", lambda **kwargs: None)
@@ -242,6 +265,24 @@ def test_fetch_build_fails_when_the_build_does_not_exist(api_client, requests_mo
         tasks._fetch_build(api_client, 42)
 
     assert excinfo.value.message_id == BuildAppError.GENERIC_WITH_BUILD_ID
+
+
+def test_fetch_build_raises_cancelled_when_the_build_was_cancelled_while_queued(
+    api_client, requests_mock
+):
+    # A worker started after the revoke was broadcast doesn't know about it
+    # (no mingle), so the build's own state is the source of truth.
+    requests_mock.get(
+        f"{API_URL}/api/v2/build/42/",
+        json={"id": 42, "version": 10, "state": "cancelled"},
+        headers=JSON,
+    )
+
+    with pytest.raises(BuildCancelled):
+        tasks._fetch_build(api_client, 42)
+
+    # Stops before the version is fetched.
+    assert not requests_for(requests_mock, "GET", "/api/v2/version/10/")
 
 
 def test_fail_build_reports_the_message_id_from_the_exception(api_client, fail_build_api):
@@ -298,16 +339,56 @@ def test_cancel_build_finalizes_the_build_as_cancelled(api_client, fail_build_ap
 
 def test_cancellation_handlers_raise_build_cancelled():
     """A revoke lands as SIGINT; it must not surface as a KeyboardInterrupt."""
-    previous = signal.getsignal(signal.SIGINT)
-    try:
-        tasks._install_cancellation_handlers()
-
-        with pytest.raises(BuildCancelled) as excinfo:
+    with pytest.raises(BuildCancelled) as excinfo, tasks._cancellation_handlers():
             os.kill(os.getpid(), signal.SIGINT)
-    finally:
-        signal.signal(signal.SIGINT, previous)
 
     assert excinfo.value.message_id == BuildCancelled.CANCELLED_BY_USER
+
+
+def test_cancellation_handlers_are_restored_after_the_task():
+    """Otherwise billiard's recycle SIGTERM logs a false cancellation."""
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    with tasks._cancellation_handlers():
+        assert signal.getsignal(signal.SIGTERM) is not previous[signal.SIGTERM]
+
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous
+
+
+@pytest.fixture
+def consumer():
+    """A stand-in for the Celery Consumer that records cancelled queues."""
+    cancelled = []
+    return types.SimpleNamespace(cancel_task_queue=cancelled.append, cancelled=cancelled)
+
+
+def test_task_received_cancels_the_queue_consumer(consumer):
+    """
+    The main process must stop consuming on the first build, or it grabs a
+    second one while the instance is already terminating.
+    """
+    request = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == ["build:isolated"]
+
+
+def test_task_received_keeps_consuming_under_docker_compose(consumer, monkeypatch):
+    monkeypatch.setenv("RTD_DOCKER_COMPOSE", "1")
+    request = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == []
+
+
+def test_task_received_ignores_other_tasks(consumer):
+    request = types.SimpleNamespace(name="some.other.task")
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == []
 
 
 @pytest.fixture
@@ -322,7 +403,7 @@ def postrun(monkeypatch):
 
 
 def test_postrun_self_terminates_after_a_build(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
 
@@ -334,7 +415,7 @@ def test_postrun_releases_scale_in_protection_before_terminating(postrun):
     Order matters: TerminateInstanceInAutoScalingGroup refuses to terminate a
     protected instance, which would strand it in the ASG.
     """
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
 
@@ -342,7 +423,7 @@ def test_postrun_releases_scale_in_protection_before_terminating(postrun):
 
 
 def test_postrun_skips_self_terminate_when_asked(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
 
@@ -351,7 +432,7 @@ def test_postrun_skips_self_terminate_when_asked(postrun):
 
 def test_postrun_releases_scale_in_protection_even_when_not_terminating(postrun):
     """A protected instance can't be scaled in either — never leave it set."""
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
 
