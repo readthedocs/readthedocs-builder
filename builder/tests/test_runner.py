@@ -136,6 +136,19 @@ def test_post_checkout_patches_commit_config_and_yaml_path(docroot):
     )
 
 
+def test_post_checkout_patches_the_base_commit_when_recorded(docroot):
+    # A pull request that merged in the base branch reports which base commit
+    # it contains, next to its own commit.
+    runner = Runner(make_director().data)
+    runner.data.build["commit"] = "abc123"
+    runner.data.build["base_commit"] = "base123"
+
+    runner._post_checkout()
+
+    payload = runner.data.api_client.build.return_value.patch.call_args.args[0]
+    assert payload == {"commit": "abc123", "base_commit": "base123"}
+
+
 def test_post_checkout_patches_config_even_without_a_commit(docroot):
     # An external build may lack a resolved commit, but the config is always set.
     runner = Runner(make_director().data)

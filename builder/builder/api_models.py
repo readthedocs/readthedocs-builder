@@ -166,6 +166,9 @@ class APIVersion:
         # ``build_data`` is set by the builder after parsing readthedocs-build.yaml
         # from the user's repo; it's pushed back to the API on completion.
         self.build_data = data.get("build_data")
+        # Pull request versions only: the commit of the base version's latest
+        # successful build, which the file tree diff compares the PR against.
+        self.base_commit = data.get("base_commit")
 
         # Nested project. Always present when the version is fetched as part
         # of the build payload via /api/v2/version/<pk>/.
