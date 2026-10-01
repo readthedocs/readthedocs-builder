@@ -23,7 +23,6 @@ from pathlib import Path
 import structlog
 from slumber.exceptions import HttpClientError
 
-from builder import binaries
 from builder import settings
 from builder.constants import ARTIFACT_TYPES
 from builder.constants import ARTIFACT_TYPES_WITHOUT_MULTIPLE_FILES_SUPPORT
