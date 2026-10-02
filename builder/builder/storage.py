@@ -222,6 +222,16 @@ class BuildMediaStorage(_S3StorageBase):
 
         return self._rclone.sync(source, destination)
 
+    def upload_file(self, source: str, destination: str):
+        """
+        Upload the single local file ``source`` to the key ``destination``.
+
+        Used for the generated parse artifacts, which land under the version's
+        ``diff/`` prefix next to server-written files — a directory sync there
+        would delete them, so each file is uploaded on its own.
+        """
+        self._client.upload_file(Filename=source, Bucket=self._bucket, Key=destination)
+
     def delete_directory(self, remote_prefix: str):
         """Delete every object under ``remote_prefix`` (paginated, batched)."""
         prefix = remote_prefix.rstrip("/") + "/"

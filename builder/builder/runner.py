@@ -512,6 +512,46 @@ class Runner:
                     media_path=media_path,
                 )
 
+        if "html" in valid_artifacts:
+            self._upload_parse_artifacts(build_media_storage)
+
+    def _upload_parse_artifacts(self, build_media_storage):
+        """
+        Parse the built HTML and upload the manifest and search payload.
+
+        See ``builder.parse``. Never fails the build: without this build's
+        manifest in storage, readthedocs.org regenerates everything from
+        storage in ``index_build``, exactly as before.
+        """
+        from builder.parse import generate_parse_artifacts
+
+        try:
+            output_path = self.data.project.artifact_path(
+                version=self.data.version.slug,
+                type_="diff",
+            )
+            filenames = generate_parse_artifacts(
+                project_slug=self.data.project.slug,
+                version_slug=self.data.version.slug,
+                build_id=self.data.build["id"],
+                html_path=self.data.project.artifact_path(
+                    version=self.data.version.slug,
+                    type_="html",
+                ),
+                output_path=output_path,
+            )
+            to_path = self.data.version.get_storage_path(media_type="diff")
+            for filename in filenames:
+                build_media_storage.upload_file(
+                    os.path.join(output_path, filename),
+                    f"{to_path}/{filename}",
+                )
+            log.info("Parse artifacts uploaded.", to_path=to_path, filenames=filenames)
+        except BuildCancelled, BuildAppError, BuildUserError:
+            raise
+        except Exception:
+            log.exception("Error generating or uploading the parse artifacts.")
+
     def _log_directory_size(self, directory, media_type):
         """
         Log the size of an artifact directory before uploading it.

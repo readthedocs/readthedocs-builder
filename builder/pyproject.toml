@@ -11,6 +11,10 @@ dependencies = [
     "docker>=7.1",
     "pydantic>=2.13",
     "pyyaml>=6.0",
+    # HTML parsing for the search payload and file tree diff manifest
+    # (``builder.parsers``, ported from readthedocs.org). Same pin as
+    # readthedocs.org's requirements so both sides hash identical output.
+    "selectolax==0.4.11",
     # Direct import in environments.py (slumber.exceptions.HttpNotFoundError),
     # independent of the shared api_client — so declared here explicitly.
     "slumber>=0.7.1",
