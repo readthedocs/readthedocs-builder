@@ -23,6 +23,7 @@ from pathlib import Path
 import structlog
 from slumber.exceptions import HttpClientError
 
+from builder import binaries
 from builder import settings
 from builder.constants import ARTIFACT_TYPES
 from builder.constants import ARTIFACT_TYPES_WITHOUT_MULTIPLE_FILES_SUPPORT
@@ -520,7 +521,7 @@ class Runner:
         Returns the size in megabytes, or ``None`` if it couldn't be computed.
         """
         try:
-            output = subprocess.check_output(["du", "--summarize", "-m", "--", directory])
+            output = subprocess.check_output([binaries.DU, "--summarize", "-m", "--", directory])
             # The output is something like: "5\t/path/to/directory".
             size_mb = int(output.decode().split()[0])
             log.info(
