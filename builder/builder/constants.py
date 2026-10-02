@@ -94,6 +94,10 @@ ARTIFACT_TYPES_WITHOUT_MULTIPLE_FILES_SUPPORT = (
 # Ported from readthedocs.projects.notifications.
 MESSAGE_PROJECT_SSH_KEY_WITH_WRITE_ACCESS = "project:ssh-key-with-write-access"
 
+# Notification message id used when an artifact directory exceeds the size limit.
+# Registered upstream as ``BuildUserError.BUILD_MEDIA_SIZE_EXCEEDED``.
+MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED = "build:user:output:media-size-exceeded"
+
 # Refspec patterns to fetch a pull/merge request HEAD from the provider as a
 # local ``external-<id>`` branch. Defined in ``builder.refspec`` so the
 # worker's bootstrap clone and the build agree on the refspec; re-exported
