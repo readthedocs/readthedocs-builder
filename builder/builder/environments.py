@@ -140,6 +140,8 @@ class BuildCommand(BuildCommandResultMixin):
         container's shell unescaped (used for user-supplied ``build.jobs`` and
         ``build.commands``, which are meant to be shell expressions).
         Defaults to ``True``.
+    :param extra_env: env vars for this command only. Their values are
+        treated as secrets and obfuscated in the recorded output.
     """
 
     def __init__(
@@ -153,6 +155,7 @@ class BuildCommand(BuildCommandResultMixin):
         record_as_success=False,
         demux=False,
         escape_command=True,
+        extra_env=None,
         **kwargs,
     ):
         self.id = None
@@ -168,6 +171,8 @@ class BuildCommand(BuildCommandResultMixin):
         self.cwd = cwd or settings.RTD_DOCKER_WORKDIR
         self.user = user or settings.RTD_DOCKER_USER
         self._environment = environment.copy() if environment else {}
+        self._extra_env = extra_env.copy() if extra_env else {}
+        self._environment.update(self._extra_env)
         if "PATH" in self._environment:
             raise BuildAppError(
                 BuildAppError.GENERIC_WITH_BUILD_ID,
@@ -281,9 +286,10 @@ class BuildCommand(BuildCommandResultMixin):
         - Obfuscates values of private project environment variables.
         - Obfuscates the Git clone token.
         """
-        sanitized = ""
+        # Obfuscate before truncating so a secret can't survive in the chunk we keep.
+        sanitized = self.obfuscate_output(output or "")
         try:
-            sanitized = output.replace("\x00", "")
+            sanitized = sanitized.replace("\x00", "")
         except TypeError, AttributeError:
             pass
 
@@ -299,25 +305,33 @@ class BuildCommand(BuildCommandResultMixin):
                 f"{truncated_output}"
             )
 
-        # Obfuscate private environment variable values.
+        return sanitized
+
+    def obfuscate_output(self, output: str) -> str:
+        """Mask private env var values, ``extra_env`` values and the clone token in ``output``."""
+        if not output:
+            return output
+
+        secrets = list(self._extra_env.values())
         if self.build_env and self.build_env.project:
             env_vars = getattr(self.build_env.project, "_environment_variables", {}) or {}
             for name, spec in env_vars.items():
                 if not spec.get("public"):
-                    value = spec["value"]
-                    obfuscated_value = f"{value[:4]}****"
-                    sanitized = sanitized.replace(value, obfuscated_value)
+                    secrets.append(spec["value"])
+        for value in secrets:
+            if value:
+                output = output.replace(value, f"{value[:4]}****")
 
-            # Obfuscate the Git clone token.
+        if self.build_env and self.build_env.project:
             clone_token = getattr(self.build_env.project, "clone_token", None)
             if clone_token:
                 # The clone token has the ``<username>:<secret>`` format.
                 secret = clone_token.split(":", 1)[-1]
                 for value in (clone_token, secret):
                     if value:
-                        sanitized = sanitized.replace(value, "****")
+                        output = output.replace(value, "****")
 
-        return sanitized
+        return output
 
     def save(self, api_client):
         """
@@ -619,8 +633,8 @@ class BuildEnvironment:
                 log.warning(
                     "Command failed",
                     command=build_cmd.get_command(),
-                    output=_truncate_output(build_cmd.output),
-                    stderr=_truncate_output(build_cmd.error),
+                    output=_truncate_output(build_cmd.obfuscate_output(build_cmd.output)),
+                    stderr=_truncate_output(build_cmd.obfuscate_output(build_cmd.error)),
                     exit_code=build_cmd.exit_code,
                     project_slug=self.project.slug if self.project else "",
                     version_slug=self.version.slug if self.version else "",
@@ -638,8 +652,8 @@ class BuildEnvironment:
                     "Build command failed",
                     command=build_cmd.get_command(),
                     exit_code=build_cmd.exit_code,
-                    output=_truncate_output(build_cmd.output),
-                    stderr=_truncate_output(build_cmd.error),
+                    output=_truncate_output(build_cmd.obfuscate_output(build_cmd.output)),
+                    stderr=_truncate_output(build_cmd.obfuscate_output(build_cmd.error)),
                 )
                 raise BuildUserError(BuildUserError.GENERIC)
         return build_cmd
