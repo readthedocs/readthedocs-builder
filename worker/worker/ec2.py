@@ -5,6 +5,7 @@ import os
 import boto3
 import requests
 import structlog
+from botocore.exceptions import ClientError
 
 
 log = structlog.get_logger(__name__)
@@ -116,9 +117,23 @@ def set_scale_in_protection(protected: bool):
         )
 
 
+def _is_at_min_size(exc: ClientError) -> bool:
+    """AWS refuses to decrement desired capacity below the group's MinSize."""
+    error = exc.response.get("Error", {})
+    message = error.get("Message", "").lower()
+    return error.get("Code") == "ValidationError" and (
+        "minsize" in message or "min size" in message
+    )
+
+
 def self_terminate():
     """
     Tell the ASG to terminate the EC2 instance we're running on.
+
+    Decrements desired capacity so a finished build shrinks the fleet instead
+    of being replaced. Replacement launches kept a scaling activity in progress
+    at all times, and AWS refuses policy-driven scale-in while one is running.
+    The step policy tops desired back up to ``dispatched + buffer`` on its own.
 
     Off EC2 (dev) there's no instance id, so this is a no-op — no dedicated
     skip flag needed.
@@ -129,6 +144,25 @@ def self_terminate():
         return
 
     client = _autoscaling_client()
+    try:
+        client.terminate_instance_in_auto_scaling_group(
+            InstanceId=instance_id,
+            ShouldDecrementDesiredCapacity=True,
+        )
+        log.info("Self-terminate requested.", instance_id=instance_id)
+        return
+    except ClientError as exc:
+        if not _is_at_min_size(exc):
+            log.exception("Self-terminate failed.", instance_id=instance_id)
+            return
+    except Exception:
+        log.exception("Self-terminate failed.", instance_id=instance_id)
+        return
+
+    # Desired already equals MinSize. This instance stopped consuming the queue
+    # when its build arrived, so leaving it alive would strand it; terminate
+    # without the decrement and let the ASG replace it to keep MinSize.
+    log.info("Fleet at MinSize; terminating without decrement.", instance_id=instance_id)
     try:
         client.terminate_instance_in_auto_scaling_group(
             InstanceId=instance_id,
