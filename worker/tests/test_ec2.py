@@ -1,7 +1,10 @@
+import datetime
+
 import boto3
 import pytest
 from botocore.stub import Stubber
 
+from worker import constants
 from worker import ec2
 
 
@@ -175,13 +178,106 @@ def test_set_scale_in_protection_never_raises(imds, asg):
     assert ec2.set_scale_in_protection(True) is None
 
 
-def test_self_terminate_decrements_desired_capacity(imds, asg):
-    """A finished build shrinks the fleet; the step policy refills it."""
-    asg.add_response(
+def stub_group(stubber, *, idle=0, protected=0, include_self=True):
+    """
+    Stub ``describe_auto_scaling_groups`` with ``idle`` unprotected in-service
+    instances, ``protected`` building ones, and (optionally) this instance.
+    """
+
+    def instance(instance_id, protected_from_scale_in):
+        return {
+            "InstanceId": instance_id,
+            "AvailabilityZone": "us-east-2a",
+            "LifecycleState": "InService",
+            "HealthStatus": "Healthy",
+            "ProtectedFromScaleIn": protected_from_scale_in,
+        }
+
+    instances = [instance(f"i-idle{n}", False) for n in range(idle)]
+    instances += [instance(f"i-busy{n}", True) for n in range(protected)]
+    if include_self:
+        instances.append(instance(INSTANCE_ID, False))
+
+    stubber.add_response(
+        "describe_auto_scaling_groups",
+        {
+            "AutoScalingGroups": [
+                {
+                    "AutoScalingGroupName": ASG_NAME,
+                    "MinSize": 5,
+                    "MaxSize": 100,
+                    "DesiredCapacity": len(instances),
+                    "DefaultCooldown": 300,
+                    "AvailabilityZones": ["us-east-2a"],
+                    "HealthCheckType": "EC2",
+                    "CreatedTime": datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
+                    "Instances": instances,
+                }
+            ]
+        },
+        {"AutoScalingGroupNames": [ASG_NAME]},
+    )
+
+
+def stub_terminate(stubber, decrement):
+    stubber.add_response(
         "terminate_instance_in_auto_scaling_group",
         {},
-        {"InstanceId": INSTANCE_ID, "ShouldDecrementDesiredCapacity": True},
+        {"InstanceId": INSTANCE_ID, "ShouldDecrementDesiredCapacity": decrement},
     )
+
+
+def test_self_terminate_decrements_when_the_warm_buffer_is_full(imds, asg):
+    """Enough idle instances already: shrink the fleet instead of being replaced."""
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER, protected=3)
+    stub_terminate(asg, decrement=True)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_is_replaced_when_the_warm_buffer_is_short(imds, asg):
+    """Too few idle instances: keep desired so the ASG launches a replacement now."""
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER - 1, protected=3)
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_does_not_count_itself_as_idle(imds, asg):
+    """Our own protection is already released by task_postrun; we're not spare capacity."""
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER - 1, include_self=True)
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_is_replaced_when_the_group_lookup_fails(imds, asg):
+    """Unknown fleet state: a replacement is the safe default."""
+    stub_describe(asg)
+    asg.add_client_error("describe_auto_scaling_groups", service_error_code="AccessDenied")
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_is_replaced_when_the_instance_has_no_asg(imds, asg):
+    asg.add_response(
+        "describe_auto_scaling_instances",
+        {"AutoScalingInstances": []},
+        {"InstanceIds": [INSTANCE_ID]},
+    )
+    stub_terminate(asg, decrement=False)
 
     ec2.self_terminate()
 
@@ -190,6 +286,8 @@ def test_self_terminate_decrements_desired_capacity(imds, asg):
 
 def test_self_terminate_without_decrement_at_min_size(imds, asg):
     """At MinSize AWS refuses the decrement; terminate anyway so the instance isn't stranded."""
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER)
     asg.add_client_error(
         "terminate_instance_in_auto_scaling_group",
         service_error_code="ValidationError",
@@ -199,11 +297,7 @@ def test_self_terminate_without_decrement_at_min_size(imds, asg):
         ),
         expected_params={"InstanceId": INSTANCE_ID, "ShouldDecrementDesiredCapacity": True},
     )
-    asg.add_response(
-        "terminate_instance_in_auto_scaling_group",
-        {},
-        {"InstanceId": INSTANCE_ID, "ShouldDecrementDesiredCapacity": False},
-    )
+    stub_terminate(asg, decrement=False)
 
     ec2.self_terminate()
 
@@ -211,6 +305,8 @@ def test_self_terminate_without_decrement_at_min_size(imds, asg):
 
 
 def test_self_terminate_does_not_retry_other_validation_errors(imds, asg, monkeypatch):
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER)
     asg.add_client_error(
         "terminate_instance_in_auto_scaling_group",
         service_error_code="ValidationError",
@@ -240,6 +336,8 @@ def test_self_terminate_skips_when_not_running_on_ec2(requests_mock, monkeypatch
 
 
 def test_self_terminate_never_raises(imds, asg):
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER)
     asg.add_client_error(
         "terminate_instance_in_auto_scaling_group", service_error_code="AccessDenied"
     )
