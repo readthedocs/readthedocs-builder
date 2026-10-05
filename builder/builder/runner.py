@@ -35,6 +35,7 @@ from builder.constants import BUILD_STATE_CLONING
 from builder.constants import BUILD_STATE_FINISHED
 from builder.constants import BUILD_STATE_INSTALLING
 from builder.constants import BUILD_STATE_UPLOADING
+from builder.constants import MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED
 from builder.constants import UNDELETABLE_ARTIFACT_TYPES
 from builder.director import BuildDirector
 from builder.exceptions import BuildAppError
@@ -482,7 +483,8 @@ class Runner:
             log.info(
                 "Uploading artifact.", media_type=media_type, from_path=from_path, to_path=to_path
             )
-            self._log_directory_size(from_path, media_type)
+            directory_size = self._compute_directory_size(from_path, media_type)
+            self._check_media_size(directory_size, media_type)
             try:
                 build_media_storage.rclone_sync_directory(from_path, to_path)
             except BuildCancelled, BuildAppError, BuildUserError:
@@ -512,22 +514,60 @@ class Runner:
                     media_path=media_path,
                 )
 
-    def _log_directory_size(self, directory, media_type):
+    def _compute_directory_size(self, directory, media_type):
         """
-        Log the size of an artifact directory before uploading it.
+        Compute and log the size of an artifact directory before uploading it.
+
+        Returns the size in megabytes, or ``None`` if it couldn't be computed.
         """
         try:
             output = subprocess.check_output([binaries.DU, "--summarize", "-m", "--", directory])
             # The output is something like: "5\t/path/to/directory".
-            directory_size = int(output.decode().split()[0])
+            size_mb = int(output.decode().split()[0])
             log.info(
-                "Build artifacts directory size.",
+                "Build artifacts directory size in megabytes.",
                 directory=directory,
-                size=directory_size,  # Size in mega bytes
+                size_mb=size_mb,
                 media_type=media_type,
             )
+            return size_mb
         except Exception:
             log.info(
                 "Error getting build artifacts directory size.",
                 exc_info=True,
             )
+            return None
+
+    def _check_media_size(self, size_mb, media_type):
+        """
+        Warn when an artifact directory exceeds the size limit.
+
+        Warning-only for now: the upload proceeds, but a warning notification
+        is attached to the build. ``size_mb`` is in megabytes; the limit is
+        configured in bytes.
+        """
+        if size_mb is None:
+            return
+        limit = self.data.project.max_build_media_size or settings.RTD_BUILD_MEDIA_MAX_SIZE
+        limit_mb = limit // (1024 * 1024)
+        if size_mb <= limit_mb:
+            return
+        log.warning(
+            "Build artifacts size exceeds the limit in megabytes.",
+            media_type=media_type,
+            size_mb=size_mb,
+            limit_mb=limit_mb,
+        )
+        try:
+            self.director.attach_notification(
+                attached_to=f"build/{self.data.build['id']}",
+                message_id=MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED,
+                format_values={
+                    "media_type": media_type,
+                    "size": size_mb,
+                    "limit": limit_mb,
+                },
+                dismissable=True,
+            )
+        except Exception:
+            log.exception("Error attaching size limit notification.")
