@@ -175,7 +175,30 @@ def test_set_scale_in_protection_never_raises(imds, asg):
     assert ec2.set_scale_in_protection(True) is None
 
 
-def test_self_terminate_asks_the_asg_to_terminate_this_instance(imds, asg):
+def test_self_terminate_decrements_desired_capacity(imds, asg):
+    """A finished build shrinks the fleet; the step policy refills it."""
+    asg.add_response(
+        "terminate_instance_in_auto_scaling_group",
+        {},
+        {"InstanceId": INSTANCE_ID, "ShouldDecrementDesiredCapacity": True},
+    )
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_without_decrement_at_min_size(imds, asg):
+    """At MinSize AWS refuses the decrement; terminate anyway so the instance isn't stranded."""
+    asg.add_client_error(
+        "terminate_instance_in_auto_scaling_group",
+        service_error_code="ValidationError",
+        service_message=(
+            "Currently, desiredSize equals minSize (5). Terminating instance without "
+            "replacement will violate group's min size constraint."
+        ),
+        expected_params={"InstanceId": INSTANCE_ID, "ShouldDecrementDesiredCapacity": True},
+    )
     asg.add_response(
         "terminate_instance_in_auto_scaling_group",
         {},
@@ -185,6 +208,27 @@ def test_self_terminate_asks_the_asg_to_terminate_this_instance(imds, asg):
     ec2.self_terminate()
 
     asg.assert_no_pending_responses()
+
+
+def test_self_terminate_does_not_retry_other_validation_errors(imds, asg, monkeypatch):
+    asg.add_client_error(
+        "terminate_instance_in_auto_scaling_group",
+        service_error_code="ValidationError",
+        service_message="Instance Id not found - No managed instance found for instance ID: i-0abc",
+    )
+    client = ec2._autoscaling_client()
+    calls = []
+    original = client.terminate_instance_in_auto_scaling_group
+    monkeypatch.setattr(
+        client,
+        "terminate_instance_in_auto_scaling_group",
+        lambda **kwargs: calls.append(kwargs) or original(**kwargs),
+    )
+
+    assert ec2.self_terminate() is None
+
+    assert len(calls) == 1
+    assert calls[0]["ShouldDecrementDesiredCapacity"] is True
 
 
 def test_self_terminate_skips_when_not_running_on_ec2(requests_mock, monkeypatch):
