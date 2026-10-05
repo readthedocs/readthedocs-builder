@@ -1,8 +1,10 @@
 """EC2 instance metadata + self-terminate."""
 
 import os
+from urllib.parse import urlparse
 
 import boto3
+import redis
 import requests
 import structlog
 from botocore.exceptions import ClientError
@@ -147,15 +149,47 @@ def _idle_instances(client, asg_name: str, instance_id: str) -> int | None:
     )
 
 
+def _queued_builds() -> int | None:
+    """
+    Builds waiting in the broker queue that no instance has claimed yet.
+
+    Read straight from Redis with the same URL Celery uses. Returns ``None`` if
+    the lookup fails.
+    """
+    broker_url = os.environ.get("RTD_BROKER_URL")
+    if not broker_url:
+        return None
+
+    kwargs = {"socket_connect_timeout": 2, "socket_timeout": 2}
+    if urlparse(broker_url).scheme == "rediss":
+        # Same as ``broker_use_ssl`` in worker.celery.
+        kwargs.update(ssl_cert_reqs=None, ssl_check_hostname=False)
+
+    try:
+        return redis.Redis.from_url(broker_url, **kwargs).llen(constants.RUN_BUILD_TASK_QUEUE)
+    except Exception:
+        log.exception("Failed to read the broker queue length.")
+        return None
+
+
 def _should_decrement(client, instance_id: str) -> bool:
     """
     Whether this instance should shrink the fleet when it terminates.
 
-    Only while the group already has ``WARM_BUFFER`` idle instances; otherwise
-    it gets replaced so the next build lands on a warm instance. Any failure
-    answers ``False``: a replacement costs an instance-minute, a missing one
-    costs a build a cold boot.
+    Only while nothing is queued and the group already has ``WARM_BUFFER``
+    idle instances; otherwise it gets replaced so the next build lands on a
+    warm instance. Any failure answers ``False``: a replacement costs an
+    instance-minute, a missing one costs a build a cold boot.
+
+    The queue check comes first: freshly launched instances count as idle for
+    the ASG before the worker on them is ready, so right after a burst
+    scale-out the idle count alone would shrink the fleet under waiting builds.
     """
+    queued = _queued_builds()
+    if queued is None or queued > 0:
+        log.info("Builds queued or queue unknown; replacing this instance.", queued=queued)
+        return False
+
     asg_name = _asg_name(client, instance_id)
     if not asg_name:
         return False
