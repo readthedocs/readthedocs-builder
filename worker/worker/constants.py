@@ -37,3 +37,8 @@ RUN_BUILD_TASK_QUEUE = "build:isolated"
 # The build task this worker runs; must match ``RTD_BUILD_ISOLATED_TASK_NAME``
 # in readthedocs.org settings.
 RUN_BUILD_TASK_NAME = "worker.tasks.run_build"
+
+# Idle instances to keep warm. Self-terminate shrinks the fleet only while at
+# least this many other instances are idle; mirrors the ``+ 5`` in the ASG
+# step ladder (readthedocs-ops ``scaling/policy.tf``).
+WARM_BUFFER = 5
