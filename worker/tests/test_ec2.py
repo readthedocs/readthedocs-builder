@@ -45,6 +45,37 @@ def asg(monkeypatch):
         yield stubber
 
 
+class FakeRedis:
+    def __init__(self, length):
+        self.length = length
+        self.llen_calls = []
+
+    def llen(self, key):
+        self.llen_calls.append(key)
+        return self.length
+
+
+@pytest.fixture(autouse=True)
+def queue(monkeypatch):
+    """
+    Stand in for the broker queue ``self_terminate`` consults.
+
+    Empty by default so the warm-buffer tests exercise the idle count; tests
+    set ``queue.length`` to simulate waiting builds. ``from_url`` kwargs are
+    recorded so the TLS handling for ``rediss://`` can be asserted.
+    """
+    monkeypatch.setenv("RTD_BROKER_URL", "redis://broker:6379/0")
+    fake = FakeRedis(length=0)
+    fake.from_url_kwargs = None
+
+    def from_url(url, **kwargs):
+        fake.from_url_kwargs = kwargs
+        return fake
+
+    monkeypatch.setattr(ec2.redis.Redis, "from_url", staticmethod(from_url))
+    return fake
+
+
 def stub_describe(stubber, asg_name=ASG_NAME):
     stubber.add_response(
         "describe_auto_scaling_instances",
@@ -258,6 +289,44 @@ def test_self_terminate_does_not_count_itself_as_idle(imds, asg):
     ec2.self_terminate()
 
     asg.assert_no_pending_responses()
+
+
+def test_self_terminate_is_replaced_while_builds_are_queued(imds, asg, queue):
+    """Waiting builds mean the idle count lies (fresh instances still booting): never shrink."""
+    queue.length = 3
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    # No describe calls were stubbed: the queue check short-circuits them.
+    asg.assert_no_pending_responses()
+    assert queue.llen_calls == [constants.RUN_BUILD_TASK_QUEUE]
+
+
+def test_self_terminate_is_replaced_when_the_queue_lookup_fails(imds, asg, monkeypatch):
+    def from_url(url, **kwargs):
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(ec2.redis.Redis, "from_url", staticmethod(from_url))
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_queued_builds_disables_tls_verification_for_rediss(monkeypatch, queue):
+    """Mirror ``broker_use_ssl`` in worker.celery: the broker cert is self-signed."""
+    monkeypatch.setenv("RTD_BROKER_URL", "rediss://broker:6379/0")
+
+    assert ec2._queued_builds() == 0
+    assert queue.from_url_kwargs["ssl_cert_reqs"] is None
+    assert queue.from_url_kwargs["ssl_check_hostname"] is False
+
+
+def test_queued_builds_uses_plain_connection_for_redis(queue):
+    assert ec2._queued_builds() == 0
+    assert "ssl_cert_reqs" not in queue.from_url_kwargs
 
 
 def test_self_terminate_is_replaced_when_the_group_lookup_fails(imds, asg):
