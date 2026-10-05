@@ -46,8 +46,8 @@ SEARCH_PAYLOAD_FILE_NAME = "search.jsonl.gz"
 SEARCH_PAYLOAD_SCHEMA_VERSION = "1.0"
 
 # Which extractor produced the content. Bump on any parser behavior change.
-# Never gates ingest — it exists for observability and for targeting
-# re-extracts of versions parsed by old extractors.
+# Never gates ingest — parser changes roll forward with new builds, so this
+# exists only for observability over which extractor produced the corpus.
 PARSER_VERSION = 1
 
 # Version of the hashing that fills the manifest. Must match
