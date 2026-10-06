@@ -1,0 +1,24 @@
+# Weekly dependency updates with a 14-day cooldown, so brand-new releases
+# that may be broken or compromised are not pulled in.
+# Security updates ignore the cooldown.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 14
+    allow:
+      # Also bump transitive pins in uv.lock, not just pyproject.toml deps.
+      - dependency-type: "all"
+    groups:
+      # One PR for everything, like the pip-tools workflow in readthedocs.org.
+      python-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
