@@ -210,6 +210,11 @@ def test_command_stores_environment():
     assert cmd._environment["BIN_PATH"] == "foobar"
 
 
+def test_command_merges_extra_env_into_the_environment():
+    cmd = BuildCommand(["echo"], environment={"FOOBAR": "foobar"}, extra_env={"SECRET": "s3cret"})
+    assert cmd._environment == {"FOOBAR": "foobar", "SECRET": "s3cret"}
+
+
 def test_command_rejects_a_path_in_the_environment():
     with pytest.raises(BuildAppError) as excinfo:
         BuildCommand(["echo"], environment={"PATH": "/usr/bin"})
@@ -373,6 +378,53 @@ def test_sanitize_output_obfuscates_private_env_vars():
     # Public values are left alone; private ones keep only their first 4 chars.
     assert cmd.sanitize_output("public-value") == "public-value"
     assert cmd.sanitize_output("private-value") == "priv****"
+
+
+def test_sanitize_output_obfuscates_extra_env_values():
+    """``extra_env`` carries secrets (the SSH deploy key), so its values are masked too."""
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], extra_env={"KEY": "private-value", "EMPTY": ""})
+    assert cmd.sanitize_output("leaked private-value here") == "leaked priv**** here"
+
+
+def test_sanitize_output_obfuscates_before_truncating():
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], extra_env={"KEY": "private-value"})
+    sanitized = cmd.sanitize_output("private-value" + "x" * 3_000_000)
+    assert "private-value" not in sanitized
+
+
+def test_failed_command_log_obfuscates_extra_env():
+    env = make_env()
+    with mock.patch("builder.environments.log") as log:
+        env.run("/bin/sh", "-c", "echo $TOKEN; exit 1", record=False, extra_env={"TOKEN": "secret-token"}, cwd="/tmp")
+    log.warning.assert_called_once()
+    assert log.warning.call_args.kwargs["output"] == "secr****\n"
+    assert "secret-token" not in str(log.mock_calls)
+
+
+def test_extra_env_does_not_persist_in_the_environment():
+    env = make_env(environment={"FOO": "foo"})
+    cmd = env.run("true", record=False, extra_env={"BAR": "bar"}, cwd="/tmp")
+    second = env.run("true", record=False, cwd="/tmp")
+    assert cmd._environment == {"FOO": "foo", "BAR": "bar"}
+    assert second._environment == {"FOO": "foo"}
+    assert env._environment == {"FOO": "foo"}
+
+
+def test_sanitize_output_obfuscates_clone_token():
+    project = APIProject(slug="test-project", clone_token="x-access-token:1234")
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], build_env=make_env(project=project))
+    # Both the remote-URL form and the bare secret are masked.
+    assert (
+        cmd.sanitize_output("https://x-access-token:1234@github.com/org/repo")
+        == "https://****@github.com/org/repo"
+    )
+    assert cmd.sanitize_output("the token is 1234") == "the token is ****"
+    assert cmd.sanitize_output("no token here") == "no token here"
+
+
+def test_sanitize_output_without_clone_token():
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], build_env=make_env())
+    assert cmd.sanitize_output("nothing to mask") == "nothing to mask"
 
 
 # ---------------------------------------------------------------------------
@@ -579,8 +631,9 @@ def test_every_variable_our_commands_use_survives_escaping():
             referenced.add(name)
 
     # ``PATH`` is prepended by ``get_wrapped_command`` itself, not escaped
-    # here; NAME/VAR are placeholders in docstrings.
-    referenced -= {"PATH", "NAME", "VAR"}
+    # here; NAME/VAR are placeholders in docstrings. The SSH key is only
+    # referenced from an ``escape_command=False`` shell expression.
+    referenced -= {"PATH", "NAME", "VAR", "READTHEDOCS_PRIVATE_SSH_KEY"}
 
     for variable in referenced:
         command = DockerBuildCommand((f"${variable}",), build_env=make_docker_env())
