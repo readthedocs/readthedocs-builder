@@ -12,19 +12,20 @@
 - ``no_self_terminate`` — whether the task_postrun handler should skip
   the AWS terminate call (debug flag, sourced from the
   ``KEEP_BUILD_ISOLATED_INSTANCE`` project feature flag).
+- ``build_os_hint`` — ``build.os`` of the version's last successful build,
+  or ``None``. The container starts from it (or the latest LTS) so the
+  real clone can run right away; the runner switches containers if the
+  checked-out config disagrees.
 
-Everything else — memory, time limit, docker image tag, command — is
-resolved here by fetching build/project data from the API and
-sparse-cloning ``.readthedocs.yaml``.
+Memory and time limit come from the project via the API.
 """
 
 import contextlib
 import os
-import shutil
 import signal
 import socket
 import subprocess
-import tempfile
+import threading
 
 import structlog
 from builder.api_client import get_build
@@ -37,14 +38,13 @@ from builder.exceptions import BuildCancelled
 from builder.lsremote import find_duplicate_reserved_versions
 from builder.lsremote import parse_lsremote
 from builder.refspec import EXTERNAL
-from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
 from celery.signals import task_received
 
 from worker import constants
 from worker.celery import app
-from worker.config import read_build_os
+from worker.config import resolve_build_os
 from worker.constants import UPLOADED_BUILD_OS
 from worker.docker import get_client
 from worker.docker import start_container
@@ -57,7 +57,6 @@ from worker.exceptions import BuildUserError
 from worker.exceptions import PreContainerFailure
 from worker.exceptions import RepositoryError
 from worker.git import lsremote
-from worker.git import sparse_clone_yaml
 
 
 log = structlog.get_logger(__name__)
@@ -218,8 +217,36 @@ def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
         log.exception("Failed to PATCH build to final state.", build_pk=build_pk, state=state)
 
 
+class _Background:
+    """
+    Run ``fn`` on a daemon thread; ``join`` re-raises whatever it raised.
+
+    Used to take work off the build's critical path without losing its
+    outcome: callers join at the point where the result matters.
+    """
+
+    def __init__(self, name, fn, *args, **kwargs):
+        self.error = None
+
+        def _run():
+            try:
+                fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 — re-raised on join
+                self.error = exc
+
+        self.thread = threading.Thread(target=_run, name=name, daemon=True)
+        self.thread.start()
+
+    def join(self, timeout=None):
+        self.thread.join(timeout)
+        if self.error is not None:
+            raise self.error
+
+
 @app.task(name=constants.RUN_BUILD_TASK_NAME, bind=True, acks_late=True)
-def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=False):
+def run_build(
+    self, *, build_pk, build_api_key, environment, no_self_terminate=False, build_os_hint=None
+):
     """
     Run a single Read the Docs build.
 
@@ -227,11 +254,16 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
 
     1. Set up an API client using ``build_api_key``.
     2. Fetch Build → Version → Project via the API.
-    3. Sparse-clone ``.readthedocs.yaml``.
-    4. Parse ``build.os`` and pick the ``readthedocs/build:<os>`` image.
-    5. Resolve ``memory`` + ``time_limit_seconds`` from project
-       fields, falling back to ``worker.constants``.
-    6. Start the build container, run the build in this process, stop it.
+    3. Resolve ``memory`` + ``time_limit_seconds`` from project fields, falling
+       back to ``worker.constants``, and the starting image from
+       ``build_os_hint``.
+    4. Start the build container, run the build in this process, stop it. The
+       runner clones inside the container and switches it if the config asks
+       for a different ``build.os``.
+
+    Scale-in protection and the version sync run on background threads so
+    neither blocks the first build command; both are joined before anything
+    that depends on them.
 
     The build runs here, in the Celery task, and reaches into the container
     with ``docker exec`` for every build command — so the container never
@@ -247,9 +279,24 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
     log.info("Received run_build task.", no_self_terminate=no_self_terminate)
 
     # Keep the ASG from scaling this instance out from under the build.
-    # Released in task_postrun, which must happen before self_terminate.
-    set_scale_in_protection(True)
+    # Released in task_postrun, which must happen before self_terminate — and
+    # after this call has landed, hence the join in the ``finally`` below.
+    protection = _Background("scale-in-protection", set_scale_in_protection, True)
+    try:
+        _run_build(
+            build_pk=build_pk,
+            build_api_key=build_api_key,
+            environment=environment,
+            build_os_hint=build_os_hint,
+        )
+    finally:
+        try:
+            protection.join(timeout=30)
+        except Exception:
+            log.exception("Scale-in protection thread failed.")
 
+
+def _run_build(*, build_pk, build_api_key, environment, build_os_hint):
     # We need the API client for both the happy path AND the fail path,
     # so build it before entering the try/except.
     api_url = environment["RTD_API_URL"]
@@ -267,10 +314,11 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
         try:
             build, version = _fetch_build(api_client, build_pk)
             build_os, memory, time_limit_seconds = _prepare_build(
-                api_client=api_client,
                 build=build,
                 version=version,
+                build_os_hint=build_os_hint,
             )
+            sync = _start_sync_versions(api_client=api_client, build=build, version=version)
         except BuildCancelled:
             _cancel_build(api_client, build_pk)
             return
@@ -283,17 +331,32 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
             "Running build.",
             memory=memory,
             time_limit=time_limit_seconds,
+            build_os_hint=build_os_hint,
         )
 
         # One client for the whole build: the worker starts and stops the
         # container with it, and the runner execs into it with the same one.
         docker_client = get_client()
 
+        def switch_container(new_build_os):
+            return _switch_container(
+                docker_client,
+                build_pk=build_pk,
+                build_os=new_build_os,
+                memory=memory,
+                environment=environment,
+            )
+
         try:
             try:
                 container = start_container(
                     docker_client, build_pk=build_pk, build_os=build_os, memory=memory
                 )
+                _start_healthcheck(docker_client, container, environment, build_pk)
+                # The ls-remote overlapped the container start; a duplicated
+                # reserved version still fails the build before it runs.
+                if sync is not None:
+                    sync.join()
             except BuildCancelled:
                 _cancel_build(api_client, build_pk)
                 return
@@ -302,8 +365,6 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                 _fail_build(api_client, build_pk, exc)
                 return
 
-            _start_healthcheck(docker_client, container, environment, build_pk)
-
             with _time_limit(time_limit_seconds):
                 run_builder(
                     api_client=api_client,
@@ -311,6 +372,8 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                     build=build,
                     version=version,
                     container_name=container,
+                    build_os=build_os,
+                    switch_container=switch_container,
                     production_domain=production_domain,
                     allow_private_repos=_to_bool(environment.get("RTD_ALLOW_PRIVATE_REPOS")),
                     s3_endpoint_url=environment.get("AWS_S3_ENDPOINT_URL") or None,
@@ -332,6 +395,22 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
             stop_container(docker_client, build_pk)
 
 
+def _switch_container(docker_client, *, build_pk, build_os, memory, environment):
+    """
+    Replace the build container with one running ``build_os``.
+
+    Called by the runner after the clone when the checked-out config asks for
+    a different image than the one we guessed. The checkout lives on the
+    host's docroot bind mount, so nothing is lost. Returns the new name.
+    """
+    log.info("Switching build container.", build_os=build_os)
+    stop_container(docker_client, build_pk)
+    container = start_container(docker_client, build_pk=build_pk, build_os=build_os, memory=memory)
+    _start_healthcheck(docker_client, container, environment, build_pk)
+    structlog.contextvars.bind_contextvars(build_os=build_os)
+    return container
+
+
 def _sync_versions(*, project, repo_url, ssh_key, git_env):
     """
     Reconcile the project's tags/branches into the database.
@@ -340,10 +419,11 @@ def _sync_versions(*, project, repo_url, ssh_key, git_env):
     duplicate ``latest``/``stable``, like upstream) → dispatch
     ``sync_versions_task`` so readthedocs.org updates the ``Version`` rows.
 
-    Runs before the container so a reserved-name conflict fails the build early
-    (the post-build server-side tasks can't). Every error *except* that conflict
-    is non-fatal — the webhook path also syncs versions — so a flaky
-    ``ls-remote`` never blocks a build.
+    Runs on a background thread while the container starts and is joined before
+    the build, so a reserved-name conflict still fails it early (the post-build
+    server-side tasks can't). Every error *except* that conflict is non-fatal —
+    the webhook path also syncs versions — so a flaky ``ls-remote`` never
+    blocks a build.
     """
     features = project.get("features") or []
     include_tags = "skip_sync_tags" not in features
@@ -418,97 +498,56 @@ def _fetch_build(api_client, build_pk):
     return build, version
 
 
-def _prepare_build(*, api_client, build, version):
+def _prepare_build(*, build, version, build_os_hint=None):
     """
-    Everything between fetching the build and starting its container.
+    Resolve the resources the container starts with.
 
-    Returns ``(build_os, memory, time_limit_seconds)``, or raises
-    ``PreContainerFailure``.
+    Returns ``(build_os, memory, time_limit_seconds)``. ``build_os`` is only a
+    starting point: the hint from the web side, the latest LTS without one, or
+    the fixed image for uploaded builds. The runner corrects it after the clone.
     """
     project = version["project"]
-    project_pk = project["id"]
 
     memory = project.get("container_mem_limit") or constants.BUILD_MEMORY_LIMIT
     time_limit_seconds = project.get("container_time_limit") or constants.BUILD_TIME_LIMIT
 
     if build.get("is_uploaded"):
-        # Nothing to clone: the artifacts came in through the upload API, so
-        # there is no repository and no ``.readthedocs.yaml`` to read
-        # ``build.os`` from.
-        log.info("Build is uploaded; skipping sparse-clone.")
         return UPLOADED_BUILD_OS, memory, time_limit_seconds
 
-    # Sparse-clone `.readthedocs.yaml`.
+    return resolve_build_os(build_os_hint), memory, time_limit_seconds
+
+
+def _start_sync_versions(*, api_client, build, version):
+    """
+    Kick off the version sync on a background thread, or return ``None``.
+
+    Skipped for uploaded builds (no repo) and external versions (a PR doesn't
+    change the branch/tag list). The caller joins the thread before the build
+    runs so a duplicated reserved version still fails it early.
+    """
+    if build.get("is_uploaded") or version.get("type") == EXTERNAL:
+        return None
+
+    project = version["project"]
     repo_url = project.get("repo") or ""
     ssh_key = ""
     if repo_url.startswith("git@") or repo_url.startswith("ssh://"):
-        ssh_key = get_project_ssh_key(api_client, project_pk)
-
-    # Fetch the same ref the runner will build. For branches the identifier is
-    # the branch name (``git clone -b`` would work), but for tags and external
-    # (PR/MR) versions it's a commit hash / pull refspec, so we resolve it here.
-    # Falls back to the remote's default branch (``HEAD``) when undecidable.
-    refspec = (
-        get_remote_fetch_refspec(
-            version_type=version.get("type", "branch"),
-            verbose_name=version.get("verbose_name", ""),
-            identifier=version.get("identifier", ""),
-            machine=version.get("machine", False),
-            slug=version.get("slug", ""),
-            is_github="github.com" in repo_url,
-            is_gitlab="gitlab.com" in repo_url,
-        )
-        or "HEAD"
-    )
+        ssh_key = get_project_ssh_key(api_client, project["id"])
 
     git_env = {
         **os.environ,
         "READTHEDOCS_GIT_CLONE_TOKEN": project.get("clone_token") or "",
     }
-
-    tmp = tempfile.mkdtemp(prefix="rtd-bootstrap-")
-    try:
-        config_path = sparse_clone_yaml(
-            repo_url=repo_url,
-            refspec=refspec,
-            ssh_key=ssh_key,
-            dest=tmp,
-            env=git_env,
-            yaml_path=project.get("readthedocs_yaml_path"),
-        )
-        if config_path is None:
-            raise PreContainerFailure(BuildUserError.NO_CONFIG_FILE_DEPRECATED)
-        # Parse build.os and resolve alias.
-        build_os = read_build_os(config_path)
-    except subprocess.CalledProcessError as exc:
-        # git clone / sparse-checkout failed — surface as an app error
-        # (could be network, auth, etc).
-        log.error(
-            "git sparse-clone failed.",
-            returncode=exc.returncode,
-            stderr=(exc.stderr or b"").decode(errors="replace")[:2000],
-        )
-        raise PreContainerFailure(BuildAppError.GENERIC_WITH_BUILD_ID)
-    except subprocess.TimeoutExpired as exc:
-        log.error("git sparse-clone timed out.", timeout_seconds=exc.timeout)
-        raise PreContainerFailure(BuildAppError.GENERIC_WITH_BUILD_ID)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    # Sync tags/branches into the DB (and fail early on a duplicate reserved
-    # version). Runs here — before the container — so it can fail the build the
-    # way upstream does.
-    # SECURITY: never sync versions from external versions (PRs),
-    # since they are not trusted and could fake the output of the commands
-    # to create/delete versions in our database.
-    if version.get("type") != EXTERNAL:
-        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
-
-    return build_os, memory, time_limit_seconds
+    return _Background(
+        "sync-versions",
+        _sync_versions,
+        project=project,
+        repo_url=repo_url,
+        ssh_key=ssh_key,
+        git_env=git_env,
+    )
 
 
-# ``git ls-remote`` is one network round trip; the app-level default
-# (``RTD_BUILDS_TASK_TIME_LIMIT``, 2h) is sized for builds, not for this.
 SYNC_REPOSITORY_TIME_LIMIT = 120
 
 

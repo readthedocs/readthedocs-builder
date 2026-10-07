@@ -4,15 +4,15 @@ import time
 import types
 
 import pytest
-
 from builder.exceptions import BuildCancelled
 from conftest import API_URL
 from conftest import JSON
-from worker import constants
-from worker import tasks
 from worker.exceptions import BuildAppError
 from worker.exceptions import BuildUserError
 from worker.exceptions import PreContainerFailure
+
+from worker import constants
+from worker import tasks
 
 
 @pytest.fixture(autouse=True)
@@ -76,18 +76,13 @@ def mock_api(requests_mock):
 
 
 @pytest.fixture
-def prepare_build(monkeypatch, tmp_path, write_config, api_client, mock_api):
-    """Run ``_prepare_build`` against the mocked API, with the clone stubbed."""
+def prepare_build(api_client, mock_api):
+    """Run ``_prepare_build`` against the mocked API."""
 
-    def _prepare(project=None, version=None, build_os="ubuntu-24.04"):
+    def _prepare(project=None, version=None, build_os_hint=None):
         mock_api(project=project, version=version)
-        config = write_config(
-            tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": build_os}}
-        )
-        monkeypatch.setattr(tasks, "sparse_clone_yaml", lambda **kwargs: config)
-
         build, version = tasks._fetch_build(api_client, 42)
-        return tasks._prepare_build(api_client=api_client, build=build, version=version)
+        return tasks._prepare_build(build=build, version=version, build_os_hint=build_os_hint)
 
     return _prepare
 
@@ -118,13 +113,6 @@ def test_prepare_build_does_not_cap_large_project_resources(prepare_build):
     assert time_limit == 108000
 
 
-def test_prepare_build_resolves_the_build_os(prepare_build):
-    build_os, _, _ = prepare_build(build_os="ubuntu-22.04")
-
-    assert build_os == "ubuntu-22.04"
-
-
-
 def test_prepare_build_returns_the_projects_time_limit(prepare_build):
     """
     The limit is returned, not exported.
@@ -137,9 +125,6 @@ def test_prepare_build_returns_the_projects_time_limit(prepare_build):
     assert time_limit == 600
 
 
-
-
-
 def test_prepare_build_does_not_claim_the_build(prepare_build, requests_mock):
     """Claiming ``Build.builder`` is the container's job — the worker must not."""
     prepare_build()
@@ -147,72 +132,30 @@ def test_prepare_build_does_not_claim_the_build(prepare_build, requests_mock):
     assert requests_for(requests_mock, "PATCH", "/api/v2/build/42/") == []
 
 
+def test_prepare_build_starts_from_the_hinted_os(prepare_build):
+    build_os, _, _ = prepare_build(build_os_hint="ubuntu-22.04")
 
-def test_prepare_build_passes_the_custom_yaml_path_to_the_clone(
-    monkeypatch, tmp_path, write_config, api_client, mock_api
-):
-    seen = {}
-    config = write_config(
-        tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": "ubuntu-24.04"}}
-    )
-    mock_api(project={"readthedocs_yaml_path": "subpath/docs/.readthedocs.yaml"})
-
-    def fake_clone(**kwargs):
-        seen.update(kwargs)
-        return config
-
-    monkeypatch.setattr(tasks, "sparse_clone_yaml", fake_clone)
-
-    build, version = tasks._fetch_build(api_client, 42)
-    tasks._prepare_build(api_client=api_client, build=build, version=version)
-
-    assert seen["yaml_path"] == "subpath/docs/.readthedocs.yaml"
+    assert build_os == "ubuntu-22.04"
 
 
-def _capture_bootstrap_refspec(monkeypatch, tmp_path, write_config, api_client, mock_api, version):
-    """Run ``_prepare_build`` with the clone stubbed and return the refspec used."""
-    seen = {}
-    config = write_config(
-        tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": "ubuntu-24.04"}}
-    )
-    mock_api(version=version)
+def test_prepare_build_resolves_the_lts_alias_in_the_hint(prepare_build):
+    build_os, _, _ = prepare_build(build_os_hint="ubuntu-lts-latest")
 
-    def fake_clone(**kwargs):
-        seen.update(kwargs)
-        return config
-
-    monkeypatch.setattr(tasks, "sparse_clone_yaml", fake_clone)
-    build, version = tasks._fetch_build(api_client, 42)
-    tasks._prepare_build(api_client=api_client, build=build, version=version)
-    return seen["refspec"]
+    assert build_os == "ubuntu-26.04"
 
 
-def test_prepare_build_fetches_the_branch_refspec(
-    monkeypatch, tmp_path, write_config, api_client, mock_api
-):
-    refspec = _capture_bootstrap_refspec(
-        monkeypatch,
-        tmp_path,
-        write_config,
-        api_client,
-        mock_api,
-        version={"type": "branch", "verbose_name": "mybranch", "identifier": "mybranch"},
-    )
-    assert refspec == "refs/heads/mybranch:refs/remotes/origin/mybranch"
+def test_prepare_build_defaults_to_the_latest_lts_without_a_hint(prepare_build):
+    """A version with no successful build yet: start somewhere, switch later if needed."""
+    build_os, _, _ = prepare_build()
+
+    assert build_os == "ubuntu-26.04"
 
 
-def test_prepare_build_fetches_the_pr_refspec_for_external_versions(
-    monkeypatch, tmp_path, write_config, api_client, mock_api
-):
-    refspec = _capture_bootstrap_refspec(
-        monkeypatch,
-        tmp_path,
-        write_config,
-        api_client,
-        mock_api,
-        version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"},
-    )
-    assert refspec == "pull/2109/head:external-2109"
+def test_prepare_build_does_not_touch_the_repo(prepare_build, requests_mock):
+    """No sparse clone anymore: the runner reads the config from the real checkout."""
+    prepare_build()
+
+    assert [r for r in requests_mock.request_history if "/key/" in r.path] == []
 
 
 @pytest.fixture
@@ -223,30 +166,80 @@ def sync_versions_calls(monkeypatch):
     return calls
 
 
-def test_prepare_build_syncs_versions_for_branch_versions(prepare_build, sync_versions_calls):
-    prepare_build(version={"type": "branch", "verbose_name": "main"})
+def _start_sync(api_client, mock_api, **mock_kwargs):
+    mock_api(**mock_kwargs)
+    build, version = tasks._fetch_build(api_client, 42)
+    return tasks._start_sync_versions(api_client=api_client, build=build, version=version)
+
+
+def test_sync_versions_runs_in_the_background_for_branch_versions(
+    api_client, mock_api, sync_versions_calls
+):
+    sync = _start_sync(api_client, mock_api, version={"type": "branch", "verbose_name": "main"})
+
+    sync.join()
 
     assert len(sync_versions_calls) == 1
+    assert sync_versions_calls[0]["repo_url"]
+    assert "READTHEDOCS_GIT_CLONE_TOKEN" in sync_versions_calls[0]["git_env"]
 
 
-def test_prepare_build_skips_syncing_versions_for_external_versions(
-    prepare_build, sync_versions_calls
-):
+def test_sync_versions_is_skipped_for_external_versions(api_client, mock_api, sync_versions_calls):
     # A PR build can't add or remove tags/branches, so there is nothing to sync.
-    prepare_build(version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"})
+    sync = _start_sync(
+        api_client,
+        mock_api,
+        version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"},
+    )
 
+    assert sync is None
     assert sync_versions_calls == []
 
 
-def test_prepare_build_fails_when_the_config_file_is_missing(monkeypatch, api_client, mock_api):
-    mock_api()
-    monkeypatch.setattr(tasks, "sparse_clone_yaml", lambda **kwargs: None)
-    build, version = tasks._fetch_build(api_client, 42)
+def test_sync_versions_is_skipped_for_uploaded_builds(api_client, mock_api, sync_versions_calls):
+    # There is no remote to ``git ls-remote``.
+    sync = _start_sync(api_client, mock_api, build={"is_uploaded": True})
 
-    with pytest.raises(PreContainerFailure) as excinfo:
-        tasks._prepare_build(api_client=api_client, build=build, version=version)
+    assert sync is None
 
-    assert excinfo.value.message_id == BuildUserError.NO_CONFIG_FILE_DEPRECATED
+
+def test_sync_versions_failure_surfaces_on_join(api_client, mock_api, monkeypatch):
+    """A duplicated reserved version must still fail the build before it runs."""
+
+    def boom(**kwargs):
+        raise PreContainerFailure(BuildUserError.GENERIC, log_message="dup")
+
+    monkeypatch.setattr(tasks, "_sync_versions", boom)
+    sync = _start_sync(api_client, mock_api, version={"type": "branch", "verbose_name": "main"})
+
+    with pytest.raises(PreContainerFailure):
+        sync.join()
+
+
+def test_switch_container_replaces_the_container_and_its_healthcheck(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tasks, "stop_container", lambda client, build_pk: calls.append(("stop", build_pk))
+    )
+    monkeypatch.setattr(
+        tasks,
+        "start_container",
+        lambda client, *, build_pk, build_os, memory: (
+            calls.append(("start", build_os, memory)) or "build-42"
+        ),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "_start_healthcheck",
+        lambda client, container, environment, build_pk: calls.append(("healthcheck", container)),
+    )
+
+    name = tasks._switch_container(
+        object(), build_pk=42, build_os="ubuntu-22.04", memory="7g", environment={}
+    )
+
+    assert name == "build-42"
+    assert calls == [("stop", 42), ("start", "ubuntu-22.04", "7g"), ("healthcheck", "build-42")]
 
 
 def test_fetch_build_fails_when_the_build_has_no_version(api_client, requests_mock):
@@ -340,7 +333,7 @@ def test_cancel_build_finalizes_the_build_as_cancelled(api_client, fail_build_ap
 def test_cancellation_handlers_raise_build_cancelled():
     """A revoke lands as SIGINT; it must not surface as a KeyboardInterrupt."""
     with pytest.raises(BuildCancelled) as excinfo, tasks._cancellation_handlers():
-            os.kill(os.getpid(), signal.SIGINT)
+        os.kill(os.getpid(), signal.SIGINT)
 
     assert excinfo.value.message_id == BuildCancelled.CANCELLED_BY_USER
 
@@ -459,51 +452,16 @@ def test_postrun_ignores_other_tasks(postrun):
 
 
 @pytest.fixture
-def prepare_uploaded_build(monkeypatch, api_client, mock_api):
-    """Run ``_prepare_build`` for an uploaded build, spying on the clone."""
-    calls = {"clone": 0, "sync_versions": 0}
+def prepare_uploaded_build(api_client, mock_api):
+    """Run ``_prepare_build`` for an uploaded build."""
 
     def _prepare(project=None):
         mock_api(project=project, build={"is_uploaded": True})
-
-        def fake_clone(**kwargs):
-            calls["clone"] += 1
-            raise AssertionError("uploaded builds must not sparse-clone")
-
-        def fake_sync(**kwargs):
-            calls["sync_versions"] += 1
-
-        monkeypatch.setattr(tasks, "sparse_clone_yaml", fake_clone)
-        monkeypatch.setattr(tasks, "_sync_versions", fake_sync)
-
         build, version = tasks._fetch_build(api_client, 42)
-        result = tasks._prepare_build(api_client=api_client, build=build, version=version)
-        return result, calls
+        result = tasks._prepare_build(build=build, version=version)
+        return result, {}
 
     return _prepare
-
-
-def test_prepare_build_skips_the_clone_for_uploaded_builds(prepare_uploaded_build):
-    _, calls = prepare_uploaded_build()
-
-    assert calls["clone"] == 0
-
-
-def test_prepare_build_skips_syncing_versions_for_uploaded_builds(prepare_uploaded_build):
-    # There is no remote to ``git ls-remote``.
-    _, calls = prepare_uploaded_build()
-
-    assert calls["sync_versions"] == 0
-
-
-def test_prepare_build_does_not_require_a_config_file_for_uploaded_builds(
-    prepare_uploaded_build,
-):
-    # A regular build with no ``.readthedocs.yaml`` fails; an uploaded one has
-    # nothing to read a config from and must still go through.
-    (build_os, _, _), _ = prepare_uploaded_build()
-
-    assert build_os
 
 
 def test_prepare_build_uses_the_latest_lts_image_for_uploaded_builds(
@@ -514,7 +472,6 @@ def test_prepare_build_uses_the_latest_lts_image_for_uploaded_builds(
     (build_os, _, _), _ = prepare_uploaded_build()
 
     assert build_os == constants.UPLOADED_BUILD_OS
-
 
 
 def test_prepare_build_resolves_the_project_resources_for_uploaded_builds(
@@ -535,8 +492,6 @@ def test_prepare_build_falls_back_to_default_resources_for_uploaded_builds(
 
     assert memory == constants.BUILD_MEMORY_LIMIT
     assert time_limit == constants.BUILD_TIME_LIMIT
-
-
 
 
 def test_fetch_build_still_fails_uploaded_builds_without_a_version(api_client, requests_mock):
@@ -648,7 +603,7 @@ def test_healthcheck_pings_the_build_from_the_container(monkeypatch):
     command = client.execs[0]["cmd"]
     assert client.execs[0]["container"] == "build-42"
     assert "https://lb.example/api/v2/build/42/healthcheck/?builder=builder-i-abc123" in command
-    assert 'Host: rtd.org' in command
+    assert "Host: rtd.org" in command
     assert f"sleep {constants.BUILD_HEALTHCHECK_DELAY}" in command
 
 

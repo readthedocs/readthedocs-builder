@@ -70,6 +70,11 @@ class TaskData:
     # substitute the local ``BuildEnvironment``.
     environment_class: type = DockerBuildEnvironment
     container_name: str | None = None
+    # ``build.os`` the container was started from (a guess until the config
+    # is read) and the worker's callback to replace it; see
+    # ``Runner._ensure_container_os``.
+    build_os: str | None = None
+    switch_container: Any = None
     # The worker's Docker client, shared so a build opens one connection.
     docker_client: Any = None
     build_director: "BuildDirector | None" = None

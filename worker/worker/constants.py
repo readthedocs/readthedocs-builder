@@ -9,6 +9,12 @@ BUILD_TIME_LIMIT = 900
 # Image for uploaded builds.
 UPLOADED_BUILD_OS = "ubuntu-26.04"
 
+# Image to start a build on before its config is known: the web side sends the
+# ``build.os`` of the version's last successful build as a hint; with no hint
+# we start the latest LTS and switch containers after the clone if the config
+# says otherwise.
+DEFAULT_BUILD_OS = "ubuntu-lts-latest"
+
 # Seconds between healthcheck pings from the runner.
 BUILD_HEALTHCHECK_DELAY = 15
 
