@@ -11,7 +11,7 @@ dependencies = [
 
     # Self-terminate via autoscaling:TerminateInstanceInAutoScalingGroup +
     # the ec2:describe_instance calls that back it up.
-    "boto3>=1.43.95",
+    "boto3>=1.43.100",
 
     # Structured logging shared with the runner. Emits JSON in prod.
     "structlog>=25.0",
