@@ -301,15 +301,6 @@ def _run_build(*, build_pk, build_api_key, environment, build_os_hint):
         # container with it, and the runner execs into it with the same one.
         docker_client = get_client()
 
-        def switch_container(new_build_os):
-            return _switch_container(
-                docker_client,
-                build_pk=build_pk,
-                build_os=new_build_os,
-                memory=memory,
-                environment=environment,
-            )
-
         try:
             try:
                 container = start_container(
@@ -325,6 +316,18 @@ def _run_build(*, build_pk, build_api_key, environment, build_os_hint):
                 return
 
             with _time_limit(time_limit_seconds):
+                # Callback for switching the container if the build.os changes.
+                # The runner calls this callback whenever it detects that the build.os
+                # has changed and a new container needs to be started.
+                def switch_container(new_build_os):
+                    return _switch_container(
+                        docker_client,
+                        build_pk=build_pk,
+                        build_os=new_build_os,
+                        memory=memory,
+                        environment=environment,
+                    )
+
                 run_builder(
                     api_client=api_client,
                     docker_client=docker_client,
