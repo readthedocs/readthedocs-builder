@@ -366,10 +366,11 @@ def _switch_container(docker_client, *, build_pk, build_os, memory, environment)
     host's docroot bind mount, so nothing is lost. Returns the new name.
     """
     log.info("Switching build container.", build_os=build_os)
+    # Bind first so the lines below carry the OS they're about.
+    structlog.contextvars.bind_contextvars(build_os=build_os)
     stop_container(docker_client, build_pk)
     container = start_container(docker_client, build_pk=build_pk, build_os=build_os, memory=memory)
     _start_healthcheck(docker_client, container, environment, build_pk)
-    structlog.contextvars.bind_contextvars(build_os=build_os)
     return container
 
 
