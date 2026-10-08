@@ -290,6 +290,11 @@ class Runner:
         self.data.container_name = self.data.switch_container(wanted)
         self.data.build_os = wanted
 
+        # The ssh-agent lives in the container we just replaced. Start a new
+        # one for the build jobs, as the legacy builder does on ``before_build``.
+        self.director.create_vcs_environment()
+        self.director.setup_ssh_agent()
+
     def _post_checkout(self):
         """
         PATCH the build fields resolved during checkout.

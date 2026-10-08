@@ -202,6 +202,7 @@ def test_ensure_container_os_keeps_the_container_when_the_config_matches(docroot
 
     switch.assert_not_called()
     assert runner.data.container_name == "build-1"
+    runner.director.setup_ssh_agent.assert_not_called()
 
 
 def test_ensure_container_os_switches_when_the_config_wants_another_image(docroot):
@@ -214,6 +215,20 @@ def test_ensure_container_os_switches_when_the_config_wants_another_image(docroo
     switch.assert_called_once_with("ubuntu-24.04")
     assert runner.data.container_name == "build-1-v2"
     assert runner.data.build_os == "ubuntu-24.04"
+
+
+def test_ensure_container_os_restarts_the_ssh_agent_in_the_new_container(docroot):
+    """The agent died with the old container; build jobs need one in the new one."""
+    switch = mock.MagicMock(return_value="build-1-v2")
+    runner = _runner_on("ubuntu-24.04", running_os="ubuntu-22.04", switch=switch)
+
+    runner._ensure_container_os()
+
+    # A fresh VCS environment bound to the new container, then the agent in it.
+    assert runner.director.mock_calls == [
+        mock.call.create_vcs_environment(),
+        mock.call.setup_ssh_agent(),
+    ]
 
 
 def test_ensure_container_os_resolves_the_lts_alias_before_comparing(docroot):
