@@ -166,18 +166,14 @@ def sync_versions_calls(monkeypatch):
     return calls
 
 
-def _start_sync(api_client, mock_api, **mock_kwargs):
+def _sync(api_client, mock_api, **mock_kwargs):
     mock_api(**mock_kwargs)
     build, version = tasks._fetch_build(api_client, 42)
-    return tasks._start_sync_versions(api_client=api_client, build=build, version=version)
+    tasks._sync_versions_for_build(api_client=api_client, build=build, version=version)
 
 
-def test_sync_versions_runs_in_the_background_for_branch_versions(
-    api_client, mock_api, sync_versions_calls
-):
-    sync = _start_sync(api_client, mock_api, version={"type": "branch", "verbose_name": "main"})
-
-    sync.join()
+def test_sync_versions_runs_for_branch_versions(api_client, mock_api, sync_versions_calls):
+    _sync(api_client, mock_api, version={"type": "branch", "verbose_name": "main"})
 
     assert len(sync_versions_calls) == 1
     assert sync_versions_calls[0]["repo_url"]
@@ -186,34 +182,32 @@ def test_sync_versions_runs_in_the_background_for_branch_versions(
 
 def test_sync_versions_is_skipped_for_external_versions(api_client, mock_api, sync_versions_calls):
     # A PR build can't add or remove tags/branches, so there is nothing to sync.
-    sync = _start_sync(
+    _sync(
         api_client,
         mock_api,
         version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"},
     )
 
-    assert sync is None
     assert sync_versions_calls == []
 
 
 def test_sync_versions_is_skipped_for_uploaded_builds(api_client, mock_api, sync_versions_calls):
     # There is no remote to ``git ls-remote``.
-    sync = _start_sync(api_client, mock_api, build={"is_uploaded": True})
+    _sync(api_client, mock_api, build={"is_uploaded": True})
 
-    assert sync is None
+    assert sync_versions_calls == []
 
 
-def test_sync_versions_failure_surfaces_on_join(api_client, mock_api, monkeypatch):
+def test_sync_versions_failure_fails_the_build(api_client, mock_api, monkeypatch):
     """A duplicated reserved version must still fail the build before it runs."""
 
     def boom(**kwargs):
         raise PreContainerFailure(BuildUserError.GENERIC, log_message="dup")
 
     monkeypatch.setattr(tasks, "_sync_versions", boom)
-    sync = _start_sync(api_client, mock_api, version={"type": "branch", "verbose_name": "main"})
 
     with pytest.raises(PreContainerFailure):
-        sync.join()
+        _sync(api_client, mock_api, version={"type": "branch", "verbose_name": "main"})
 
 
 def test_switch_container_replaces_the_container_and_its_healthcheck(monkeypatch):

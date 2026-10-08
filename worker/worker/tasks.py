@@ -25,7 +25,6 @@ import os
 import signal
 import socket
 import subprocess
-import threading
 
 import structlog
 from builder.api_client import get_build
@@ -217,32 +216,6 @@ def _finalize_build(api_client, build_pk: int, *, state: str) -> None:
         log.exception("Failed to PATCH build to final state.", build_pk=build_pk, state=state)
 
 
-class _Background:
-    """
-    Run ``fn`` on a daemon thread; ``join`` re-raises whatever it raised.
-
-    Used to take work off the build's critical path without losing its
-    outcome: callers join at the point where the result matters.
-    """
-
-    def __init__(self, name, fn, *args, **kwargs):
-        self.error = None
-
-        def _run():
-            try:
-                fn(*args, **kwargs)
-            except BaseException as exc:  # noqa: BLE001 — re-raised on join
-                self.error = exc
-
-        self.thread = threading.Thread(target=_run, name=name, daemon=True)
-        self.thread.start()
-
-    def join(self, timeout=None):
-        self.thread.join(timeout)
-        if self.error is not None:
-            raise self.error
-
-
 @app.task(name=constants.RUN_BUILD_TASK_NAME, bind=True, acks_late=True)
 def run_build(
     self, *, build_pk, build_api_key, environment, no_self_terminate=False, build_os_hint=None
@@ -261,10 +234,6 @@ def run_build(
        runner clones inside the container and switches it if the config asks
        for a different ``build.os``.
 
-    Scale-in protection and the version sync run on background threads so
-    neither blocks the first build command; both are joined before anything
-    that depends on them.
-
     The build runs here, in the Celery task, and reaches into the container
     with ``docker exec`` for every build command — so the container never
     holds our credentials or runs our code.
@@ -279,21 +248,15 @@ def run_build(
     log.info("Received run_build task.", no_self_terminate=no_self_terminate)
 
     # Keep the ASG from scaling this instance out from under the build.
-    # Released in task_postrun, which must happen before self_terminate — and
-    # after this call has landed, hence the join in the ``finally`` below.
-    protection = _Background("scale-in-protection", set_scale_in_protection, True)
-    try:
-        _run_build(
-            build_pk=build_pk,
-            build_api_key=build_api_key,
-            environment=environment,
-            build_os_hint=build_os_hint,
-        )
-    finally:
-        try:
-            protection.join(timeout=30)
-        except Exception:
-            log.exception("Scale-in protection thread failed.")
+    # Released in task_postrun, which must happen before self_terminate.
+    set_scale_in_protection(True)
+
+    _run_build(
+        build_pk=build_pk,
+        build_api_key=build_api_key,
+        environment=environment,
+        build_os_hint=build_os_hint,
+    )
 
 
 def _run_build(*, build_pk, build_api_key, environment, build_os_hint):
@@ -318,7 +281,7 @@ def _run_build(*, build_pk, build_api_key, environment, build_os_hint):
                 version=version,
                 build_os_hint=build_os_hint,
             )
-            sync = _start_sync_versions(api_client=api_client, build=build, version=version)
+            _sync_versions_for_build(api_client=api_client, build=build, version=version)
         except BuildCancelled:
             _cancel_build(api_client, build_pk)
             return
@@ -353,10 +316,6 @@ def _run_build(*, build_pk, build_api_key, environment, build_os_hint):
                     docker_client, build_pk=build_pk, build_os=build_os, memory=memory
                 )
                 _start_healthcheck(docker_client, container, environment, build_pk)
-                # The ls-remote overlapped the container start; a duplicated
-                # reserved version still fails the build before it runs.
-                if sync is not None:
-                    sync.join()
             except BuildCancelled:
                 _cancel_build(api_client, build_pk)
                 return
@@ -419,11 +378,10 @@ def _sync_versions(*, project, repo_url, ssh_key, git_env):
     duplicate ``latest``/``stable``, like upstream) → dispatch
     ``sync_versions_task`` so readthedocs.org updates the ``Version`` rows.
 
-    Runs on a background thread while the container starts and is joined before
-    the build, so a reserved-name conflict still fails it early (the post-build
-    server-side tasks can't). Every error *except* that conflict is non-fatal —
-    the webhook path also syncs versions — so a flaky ``ls-remote`` never
-    blocks a build.
+    Runs before the container starts so a reserved-name conflict fails the
+    build early (the post-build server-side tasks can't). Every error *except*
+    that conflict is non-fatal — the webhook path also syncs versions — so a
+    flaky ``ls-remote`` never blocks a build.
     """
     features = project.get("features") or []
     include_tags = "skip_sync_tags" not in features
@@ -517,16 +475,15 @@ def _prepare_build(*, build, version, build_os_hint=None):
     return resolve_build_os(build_os_hint), memory, time_limit_seconds
 
 
-def _start_sync_versions(*, api_client, build, version):
+def _sync_versions_for_build(*, api_client, build, version):
     """
-    Kick off the version sync on a background thread, or return ``None``.
+    Sync the project's versions, unless this build has nothing to sync.
 
     Skipped for uploaded builds (no repo) and external versions (a PR doesn't
-    change the branch/tag list). The caller joins the thread before the build
-    runs so a duplicated reserved version still fails it early.
+    change the branch/tag list — and its output is untrusted).
     """
     if build.get("is_uploaded") or version.get("type") == EXTERNAL:
-        return None
+        return
 
     project = version["project"]
     repo_url = project.get("repo") or ""
@@ -538,14 +495,7 @@ def _start_sync_versions(*, api_client, build, version):
         **os.environ,
         "READTHEDOCS_GIT_CLONE_TOKEN": project.get("clone_token") or "",
     }
-    return _Background(
-        "sync-versions",
-        _sync_versions,
-        project=project,
-        repo_url=repo_url,
-        ssh_key=ssh_key,
-        git_env=git_env,
-    )
+    _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
 
 SYNC_REPOSITORY_TIME_LIMIT = 120
