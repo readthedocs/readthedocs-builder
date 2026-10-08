@@ -17,8 +17,24 @@ from worker.git import _run_lsremote
 from worker.git import _run_sparse_clone
 from worker.git import _sparse_clone_yaml_https
 from worker.git import _ssh_agent
+from worker.git import _with_clone_token
 from worker.git import lsremote
 from worker.git import sparse_clone_yaml
+
+
+@pytest.mark.parametrize(
+    "repo_url,token,expected",
+    [
+        ("https://github.com/org/repo.git", "tok", "https://tok@github.com/org/repo.git"),
+        ("https://github.com/org/repo.git", "", "https://@github.com/org/repo.git"),
+        ("http://gitea.local/org/repo", "tok", "http://tok@gitea.local/org/repo"),
+        # git:// has no userinfo; ``git://@host/…`` is rejected by git.
+        ("git://10.10.0.1/test-builds", "", "git://10.10.0.1/test-builds"),
+        ("git://10.10.0.1/test-builds", "tok", "git://10.10.0.1/test-builds"),
+    ],
+)
+def test_with_clone_token_only_touches_http_urls(repo_url, token, expected):
+    assert _with_clone_token(repo_url, {"READTHEDOCS_GIT_CLONE_TOKEN": token}) == expected
 
 
 @pytest.fixture
