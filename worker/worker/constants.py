@@ -39,7 +39,7 @@ RUN_BUILD_TASK_QUEUE = "build:isolated"
 RUN_BUILD_TASK_NAME = "worker.tasks.run_build"
 
 # Self-terminate shrinks the fleet only while at least this many other
-# instances are idle. The ASG's "Fleet warm buffer" policy (readthedocs-ops
-# ``scaling/policy.tf``) adds instances below 5, so idle floats between 5
-# and 9 and the two never act on the same value.
-WARM_BUFFER = 10
+# instances are idle. The ASG's "Fleet size" ladder (readthedocs-ops
+# ``scaling/policy.tf``) plans 20..24 idle; this sits above that plus a
+# small margin so the worker never trims what the ladder just added.
+WARM_BUFFER = 27
