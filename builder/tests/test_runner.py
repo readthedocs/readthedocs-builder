@@ -181,6 +181,85 @@ def test_update_version_omits_build_data_when_absent(docroot):
     assert "build_data" not in payload
 
 
+def _runner_on(config_os, *, running_os, switch=None):
+    runner = _make_runner(
+        {
+            "build": {"os": config_os, "tools": {"python": "3"}},
+            "sphinx": {"configuration": "conf.py"},
+        }
+    )
+    runner.data.container_name = "build-1"
+    runner.data.build_os = running_os
+    runner.data.switch_container = switch
+    return runner
+
+
+def test_ensure_container_os_keeps_the_container_when_the_config_matches(docroot):
+    switch = mock.MagicMock()
+    runner = _runner_on("ubuntu-22.04", running_os="ubuntu-22.04", switch=switch)
+
+    runner._ensure_container_os()
+
+    switch.assert_not_called()
+    assert runner.data.container_name == "build-1"
+    runner.director.setup_ssh_agent.assert_not_called()
+
+
+def test_ensure_container_os_switches_when_the_config_wants_another_image(docroot):
+    """The worker guessed from the last build; the checked-out config disagrees."""
+    switch = mock.MagicMock(return_value="build-1-v2")
+    runner = _runner_on("ubuntu-24.04", running_os="ubuntu-22.04", switch=switch)
+
+    runner._ensure_container_os()
+
+    switch.assert_called_once_with("ubuntu-24.04")
+    assert runner.data.container_name == "build-1-v2"
+    assert runner.data.build_os == "ubuntu-24.04"
+
+
+def test_ensure_container_os_restarts_the_ssh_agent_in_the_new_container(docroot):
+    """The agent died with the old container; build jobs need one in the new one."""
+    switch = mock.MagicMock(return_value="build-1-v2")
+    runner = _runner_on("ubuntu-24.04", running_os="ubuntu-22.04", switch=switch)
+
+    runner._ensure_container_os()
+
+    # A fresh VCS environment bound to the new container, then the agent in it.
+    assert runner.director.mock_calls == [
+        mock.call.create_vcs_environment(),
+        mock.call.setup_ssh_agent(),
+    ]
+
+
+def test_ensure_container_os_resolves_the_lts_alias_before_comparing(docroot):
+    switch = mock.MagicMock()
+    runner = _runner_on("ubuntu-lts-latest", running_os="ubuntu-26.04", switch=switch)
+
+    runner._ensure_container_os()
+
+    switch.assert_not_called()
+
+
+def test_ensure_container_os_is_a_noop_without_a_switch_callback(docroot):
+    runner = _runner_on("ubuntu-24.04", running_os="ubuntu-22.04", switch=None)
+
+    runner._ensure_container_os()
+
+    assert runner.data.container_name == "build-1"
+
+
+def test_run_checks_the_container_os_right_after_checkout(docroot):
+    """The switch must land between the clone and the build environment."""
+    switch = mock.MagicMock(return_value="build-1-v2")
+    runner = _runner_on("ubuntu-24.04", running_os="ubuntu-22.04", switch=switch)
+
+    runner.run()
+
+    switch.assert_called_once_with("ubuntu-24.04")
+    order = [c[0] for c in runner.director.method_calls]
+    assert order.index("setup_vcs") < order.index("create_build_environment")
+
+
 def test_run_posts_checkout_metadata_after_setup_vcs(docroot):
     # The post-checkout PATCH happens once, right after the clone.
     runner = _make_runner(

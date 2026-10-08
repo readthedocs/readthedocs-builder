@@ -1,13 +1,10 @@
-"""Locating and reading the project's ``.readthedocs.yaml``."""
+"""Locating the project's ``.readthedocs.yaml`` and resolving ``build.os``."""
 
 import os
 
-import yaml
-from builder.constants_docker import RTD_DOCKER_BUILD_SETTINGS
+from builder.constants_docker import resolve_build_os_alias
 
 from worker import constants
-from worker.exceptions import BuildUserError
-from worker.exceptions import PreContainerFailure
 
 
 def find_config_file(dest: str, yaml_path: str | None = None) -> str | None:
@@ -28,26 +25,11 @@ def find_config_file(dest: str, yaml_path: str | None = None) -> str | None:
     return None
 
 
-def read_build_os(config_path: str) -> str:
+def resolve_build_os(build_os: str | None) -> str:
     """
-    Parse ``.readthedocs.yaml`` and return the ``build.os`` value.
+    Concrete OS tag for a ``build.os`` value, or the default when unset.
 
     Resolves the ``ubuntu-lts-latest`` alias via ``RTD_DOCKER_BUILD_SETTINGS``
-    so the rest of the pipeline only ever sees a concrete OS tag.
+    so the rest of the pipeline only ever sees a concrete tag.
     """
-    with open(config_path) as fh:
-        config = yaml.safe_load(fh)
-
-    if not isinstance(config, dict):
-        raise PreContainerFailure(BuildUserError.NO_CONFIG_FILE_DEPRECATED)
-
-    build_os = (config.get("build") or {}).get("os")
-    if not build_os:
-        raise PreContainerFailure(BuildUserError.BUILD_OS_REQUIRED)
-
-    if build_os == "ubuntu-lts-latest":
-        alias = RTD_DOCKER_BUILD_SETTINGS["os"].get("ubuntu-lts-latest", "")
-        if ":" in alias:
-            build_os = alias.split(":", 1)[1]
-
-    return build_os
+    return resolve_build_os_alias(build_os or constants.DEFAULT_BUILD_OS)

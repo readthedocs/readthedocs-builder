@@ -90,6 +90,16 @@ _TOOLS = RTD_DOCKER_BUILD_SETTINGS["tools"]
 
 _OS["ubuntu-lts-latest"] = _OS["ubuntu-26.04"]
 
+
+def resolve_build_os_alias(build_os: str) -> str:
+    """Concrete OS tag for a ``build.os`` value (``ubuntu-lts-latest`` resolved)."""
+    if build_os == "ubuntu-lts-latest":
+        alias = _OS.get("ubuntu-lts-latest", "")
+        if ":" in alias:
+            return alias.split(":", 1)[1]
+    return build_os
+
+
 _TOOLS["python"]["3"] = _TOOLS["python"]["3.14"]
 _TOOLS["python"]["latest"] = _TOOLS["python"]["3"]
 _TOOLS["python"]["miniconda-latest"] = _TOOLS["python"]["miniconda3-3.12-24.9"]
