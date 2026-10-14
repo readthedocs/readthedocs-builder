@@ -88,6 +88,23 @@ def test_run_build_passes_the_container_the_worker_started(docroot, runner):
     assert task_data(runner).docker_client is docker_client
 
 
+def test_run_build_passes_the_starting_os_and_the_switch_callback(docroot, runner):
+    """The runner needs both to swap the container if the config disagrees."""
+    switch = mock.MagicMock()
+
+    run(build_os="ubuntu-22.04", switch_container=switch)
+
+    assert task_data(runner).build_os == "ubuntu-22.04"
+    assert task_data(runner).switch_container is switch
+
+
+def test_run_build_defaults_to_no_container_switching(docroot, runner):
+    run()
+
+    assert task_data(runner).build_os is None
+    assert task_data(runner).switch_container is None
+
+
 def test_run_build_passes_the_platform_settings_through(docroot, runner):
     run(
         production_domain="readthedocs.com",

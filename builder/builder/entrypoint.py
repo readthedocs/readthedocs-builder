@@ -33,6 +33,8 @@ def run_build(
     production_domain: str,
     allow_private_repos: bool = False,
     s3_endpoint_url: str | None = None,
+    build_os: str | None = None,
+    switch_container=None,
 ) -> bool:
     """
     Run ``build``. Returns its success boolean.
@@ -52,6 +54,10 @@ def run_build(
         repositories, which gates the SSH deploy-key path.
     :param s3_endpoint_url: S3-compatible endpoint to use instead of AWS. Only
         set in development.
+    :param build_os: the ``build.os`` the container was started from, guessed
+        before the config is known.
+    :param switch_container: callback ``(build_os) -> container_name`` the
+        runner uses when the checked-out config asks for a different image.
 
     Every failure from here on is reported by the runner itself, through the
     API — the worker's job was to get us this far.
@@ -83,6 +89,8 @@ def run_build(
         production_domain=production_domain,
         allow_private_repos=allow_private_repos,
         s3_endpoint_url=s3_endpoint_url,
+        build_os=build_os,
+        switch_container=switch_container,
     )
 
     success = Runner(data=data).run()

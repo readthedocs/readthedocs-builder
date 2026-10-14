@@ -37,6 +37,7 @@ from builder.constants import BUILD_STATE_INSTALLING
 from builder.constants import BUILD_STATE_UPLOADING
 from builder.constants import MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED
 from builder.constants import UNDELETABLE_ARTIFACT_TYPES
+from builder.constants_docker import resolve_build_os_alias
 from builder.director import BuildDirector
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildCancelled
@@ -88,6 +89,7 @@ class Runner:
                 self.director.create_vcs_environment()
                 self.director.setup_vcs()
                 self._post_checkout()
+                self._ensure_container_os()
 
                 self._set_build_state(BUILD_STATE_INSTALLING)
                 self.director.create_build_environment()
@@ -266,6 +268,32 @@ class Runner:
         """PATCH the build's state."""
         log.info("Build state.", state=state)
         self.data.api_client.build(self.data.build["id"]).patch({"state": state})
+
+    def _ensure_container_os(self):
+        """
+        Swap the build container if the config wants a different ``build.os``.
+
+        The worker started the container from a guess (the version's last
+        successful ``build.os``, or the latest LTS) so the clone could run at
+        once. Now the config is known; on a mismatch the worker replaces the
+        container and ``create_build_environment`` picks up the new name. The
+        checkout is on the host's docroot mount, so nothing is redone.
+        """
+        if not self.data.switch_container or not self.data.build_os:
+            return
+
+        wanted = resolve_build_os_alias(self.data.config.build.os)
+        if wanted == self.data.build_os:
+            return
+
+        log.info("Config wants a different build.os.", running=self.data.build_os, wanted=wanted)
+        self.data.container_name = self.data.switch_container(wanted)
+        self.data.build_os = wanted
+
+        # The ssh-agent lives in the container we just replaced. Start a new
+        # one for the build jobs, as the legacy builder does on ``before_build``.
+        self.director.create_vcs_environment()
+        self.director.setup_ssh_agent()
 
     def _post_checkout(self):
         """
