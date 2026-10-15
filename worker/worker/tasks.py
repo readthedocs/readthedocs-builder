@@ -9,9 +9,10 @@
 - ``environment`` — where this build's Read the Docs lives: API URL,
   domain, whether private repos exist. Handed to both the worker's API
   client and the runner.
-- ``no_self_terminate`` — whether the task_postrun handler should skip
-  the AWS terminate call (debug flag, sourced from the
-  ``KEEP_BUILD_ISOLATED_INSTANCE`` project feature flag).
+- ``no_self_terminate`` — debug flag sourced from the
+  ``KEEP_BUILD_ISOLATED_INSTANCE`` project feature flag. The API decides
+  whether to keep the instance; here it only disables the power-off
+  fallback when the API can't be reached.
 
 Everything else — memory, time limit, docker image tag, command — is
 resolved here by fetching build/project data from the API and
@@ -43,6 +44,7 @@ from celery.signals import task_postrun
 from celery.signals import task_received
 
 from worker import constants
+from worker import instance
 from worker.celery import app
 from worker.config import read_build_os
 from worker.constants import UPLOADED_BUILD_OS
@@ -50,8 +52,6 @@ from worker.docker import get_client
 from worker.docker import start_container
 from worker.docker import start_healthcheck
 from worker.docker import stop_container
-from worker.ec2 import self_terminate
-from worker.ec2 import set_scale_in_protection
 from worker.exceptions import BuildAppError
 from worker.exceptions import BuildUserError
 from worker.exceptions import PreContainerFailure
@@ -61,6 +61,10 @@ from worker.git import sparse_clone_yaml
 
 
 log = structlog.get_logger(__name__)
+
+# The release call runs in task_postrun with the systemd stop timeout (60s)
+# as the ceiling; keep it short and fall back to a power off.
+RELEASE_TIMEOUT_SECONDS = 10
 
 
 def _start_healthcheck(docker_client, container, environment, build_pk):
@@ -246,10 +250,6 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
     structlog.contextvars.bind_contextvars(build_pk=build_pk)
     log.info("Received run_build task.", no_self_terminate=no_self_terminate)
 
-    # Keep the ASG from scaling this instance out from under the build.
-    # Released in task_postrun, which must happen before self_terminate.
-    set_scale_in_protection(True)
-
     # We need the API client for both the happy path AND the fail path,
     # so build it before entering the try/except.
     api_url = environment["RTD_API_URL"]
@@ -260,6 +260,10 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
         build_api_key=build_api_key,
         production_domain=production_domain,
     )
+
+    # Keep the ASG from scaling this instance out from under the build.
+    # Released in task_postrun.
+    instance.protect(api_client, build_pk, socket.gethostname())
 
     # Installed here rather than in the runner: a cancellation can arrive while
     # the bootstrap below is still running.
@@ -585,13 +589,17 @@ def _on_run_build_received(sender, request=None, **_):
 @task_postrun.connect
 def _on_run_build_postrun(sender, kwargs=None, **_):
     """
-    Self-terminate the EC2 instance after a build task finishes.
+    Release the EC2 instance after a build task finishes.
 
     Connected to Celery's ``task_postrun`` signal, which fires after
     a task's body returns — for success, failure, soft-time-limit
     expiry, and signal-revoked cancellation alike. The signal receives
-    the task's *actual* kwargs, so we read ``no_self_terminate``
-    directly off the call we're handling. No module-level state.
+    the task's *actual* kwargs, so the API client is rebuilt from them.
+    No module-level state.
+
+    The API releases scale-in protection and terminates the instance
+    (or keeps it, per the project's feature flag). If the API can't be
+    reached, the host powers itself off so it never leaks.
 
     Filtered to ``run_build`` since this is the only task this worker
     is meant to consume; if some other task somehow ended up routed
@@ -600,17 +608,29 @@ def _on_run_build_postrun(sender, kwargs=None, **_):
     if sender is None or sender.name != constants.RUN_BUILD_TASK_NAME:
         return
 
-    # Always released, even when we skip the terminate below: a protected
-    # instance can't be terminated by the ASG *or* by self_terminate, so
-    # leaving it set would strand it until someone clears it by hand.
-    set_scale_in_protection(False)
+    kwargs = kwargs or {}
+    state = instance.InstanceState.FAILED
+    try:
+        environment = kwargs["environment"]
+        api_client = setup_api(
+            api_url=environment["RTD_API_URL"],
+            build_api_key=kwargs["build_api_key"],
+            production_domain=environment.get("RTD_PRODUCTION_DOMAIN"),
+            timeout_seconds=RELEASE_TIMEOUT_SECONDS,
+            retries=1,
+        )
+        state = instance.release(api_client, kwargs["build_pk"])
+    except Exception:
+        log.exception("Failed to release the instance.")
 
-    if (kwargs or {}).get("no_self_terminate"):
+    if state in (instance.InstanceState.TERMINATED, instance.InstanceState.KEPT):
+        return
+
+    if kwargs.get("no_self_terminate"):
         log.warning(
-            "Skipping self-terminate: KEEP_BUILD_ISOLATED_INSTANCE "
-            "feature flag set on the project. Instance will remain in "
-            "the ASG until manually terminated."
+            "Instance release failed; keeping the instance alive because "
+            "KEEP_BUILD_ISOLATED_INSTANCE is set on the project."
         )
         return
 
-    self_terminate()
+    instance.poweroff()
