@@ -609,7 +609,7 @@ def _on_run_build_postrun(sender, kwargs=None, **_):
         return
 
     kwargs = kwargs or {}
-    state = instance.STATE_FAILED
+    state = instance.InstanceState.FAILED
     try:
         environment = kwargs["environment"]
         api_client = setup_api(
@@ -623,7 +623,7 @@ def _on_run_build_postrun(sender, kwargs=None, **_):
     except Exception:
         log.exception("Failed to release the instance.")
 
-    if state in (instance.STATE_TERMINATED, instance.STATE_KEPT):
+    if state in (instance.InstanceState.TERMINATED, instance.InstanceState.KEPT):
         return
 
     if kwargs.get("no_self_terminate"):

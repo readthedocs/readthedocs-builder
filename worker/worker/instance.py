@@ -10,6 +10,7 @@ launch template terminates the instance on shutdown.
 
 import os
 import subprocess
+from enum import StrEnum
 
 import structlog
 
@@ -17,9 +18,13 @@ import structlog
 log = structlog.get_logger(__name__)
 
 
-STATE_TERMINATED = "terminated"
-STATE_KEPT = "kept"
-STATE_FAILED = "failed"
+class InstanceState(StrEnum):
+    """Outcome of an instance release, as the API reports it."""
+
+    TERMINATED = "terminated"
+    KEPT = "kept"
+    FAILED = "failed"
+
 
 POWEROFF_COMMAND = ["sudo", "--non-interactive", "/usr/bin/systemctl", "poweroff"]
 POWEROFF_TIMEOUT_SECONDS = 30
@@ -42,20 +47,25 @@ def protect(api_client, build_pk: int, hostname: str) -> bool:
     return True
 
 
-def release(api_client, build_pk: int) -> str:
+def release(api_client, build_pk: int) -> InstanceState:
     """
     Ask the API to release and terminate this instance.
 
-    Returns ``terminated``, ``kept`` or ``failed``. Only ``failed`` (or an
-    unreachable API) should make the caller power off the host.
+    Only ``FAILED`` (or an unreachable API) should make the caller power off
+    the host.
     """
     try:
         response = api_client.build(build_pk).instance.release.post() or {}
     except Exception:
         log.exception("Failed to release the instance.")
-        return STATE_FAILED
+        return InstanceState.FAILED
 
-    state = response.get("state", STATE_FAILED)
+    try:
+        state = InstanceState(response.get("state"))
+    except ValueError:
+        log.error("Unexpected instance release response.", response=response)
+        return InstanceState.FAILED
+
     log.info("Instance released.", state=state, decremented=response.get("decremented"))
     return state
 

@@ -38,26 +38,32 @@ def test_protect_calls_the_api_under_docker_compose_too(api_client, requests_moc
 def test_release_returns_the_state_the_api_decided(api_client, requests_mock):
     requests_mock.post(RELEASE_URL, json={"state": "kept", "decremented": False}, headers=JSON)
 
-    assert instance.release(api_client, 42) == "kept"
+    assert instance.release(api_client, 42) is instance.InstanceState.KEPT
 
 
 def test_release_fails_when_the_api_errors(api_client, requests_mock):
     requests_mock.post(RELEASE_URL, status_code=500)
 
-    assert instance.release(api_client, 42) == "failed"
+    assert instance.release(api_client, 42) is instance.InstanceState.FAILED
 
 
 def test_release_fails_on_an_unexpected_payload(api_client, requests_mock):
     requests_mock.post(RELEASE_URL, json={}, headers=JSON)
 
-    assert instance.release(api_client, 42) == "failed"
+    assert instance.release(api_client, 42) is instance.InstanceState.FAILED
+
+
+def test_release_fails_on_an_unknown_state(api_client, requests_mock):
+    requests_mock.post(RELEASE_URL, json={"state": "exploded"}, headers=JSON)
+
+    assert instance.release(api_client, 42) is instance.InstanceState.FAILED
 
 
 def test_release_calls_the_api_under_docker_compose_too(api_client, requests_mock, monkeypatch):
     monkeypatch.setenv("RTD_DOCKER_COMPOSE", "1")
     requests_mock.post(RELEASE_URL, json={"state": "kept", "decremented": False}, headers=JSON)
 
-    assert instance.release(api_client, 42) == "kept"
+    assert instance.release(api_client, 42) is instance.InstanceState.KEPT
 
     assert requests_mock.call_count == 1
 
