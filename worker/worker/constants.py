@@ -38,8 +38,7 @@ RUN_BUILD_TASK_QUEUE = "build:isolated"
 # in readthedocs.org settings.
 RUN_BUILD_TASK_NAME = "worker.tasks.run_build"
 
-# Self-terminate shrinks the fleet only while at least this many other
-# instances are idle. The ASG's "Fleet size" ladder (readthedocs-ops
-# ``scaling/policy.tf``) plans 20..24 idle; this sits above that plus a
-# small margin so the worker never trims what the ladder just added.
-WARM_BUFFER = 27
+# Idle instances kept ahead of demand. Each claim raises desired capacity to
+# building + queued + BUFFER (see ``worker.ec2.ensure_warm_buffer``). Must
+# cover the builds that arrive while a new instance boots (~45 s).
+BUFFER = 20
