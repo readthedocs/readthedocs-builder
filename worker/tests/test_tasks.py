@@ -391,61 +391,94 @@ def test_task_received_ignores_other_tasks(consumer):
     assert consumer.cancelled == []
 
 
+RELEASE_PATH = "/api/v2/build/42/instance/release/"
+POSTRUN_KWARGS = {
+    "build_pk": 42,
+    "build_api_key": "TOKEN",
+    "environment": {"RTD_API_URL": API_URL, "RTD_PRODUCTION_DOMAIN": "readthedocs.org"},
+    "no_self_terminate": False,
+}
+
+
 @pytest.fixture
-def postrun(monkeypatch):
-    """Record the ordered instance-lifecycle calls the postrun handler makes."""
+def poweroff(monkeypatch):
+    """Record the power-off fallback; the API side is mocked per test."""
     calls = []
-    monkeypatch.setattr(tasks, "self_terminate", lambda: calls.append("terminated"))
-    monkeypatch.setattr(
-        tasks, "set_scale_in_protection", lambda protected: calls.append(f"protected={protected}")
-    )
+    monkeypatch.setattr(tasks.instance, "poweroff", lambda: calls.append("poweroff"))
     return calls
 
 
-def test_postrun_self_terminates_after_a_build(postrun):
+def _postrun(sender_name=constants.RUN_BUILD_TASK_NAME, **overrides):
+    sender = types.SimpleNamespace(name=sender_name)
+    tasks._on_run_build_postrun(sender, kwargs={**POSTRUN_KWARGS, **overrides})
+
+
+def _release_api(requests_mock, state):
+    requests_mock.post(
+        f"{API_URL}{RELEASE_PATH}",
+        json={"state": state, "decremented": False},
+        headers=JSON,
+    )
+
+
+def test_postrun_releases_the_instance_through_the_api(poweroff, requests_mock):
+    _release_api(requests_mock, "terminated")
+
+    _postrun()
+
+    (request,) = requests_for(requests_mock, "POST", RELEASE_PATH)
+    assert request.headers["Authorization"] == "Token TOKEN"
+    assert request.headers["Host"] == "readthedocs.org"
+    assert poweroff == []
+
+
+def test_postrun_leaves_a_kept_instance_alone(poweroff, requests_mock):
+    _release_api(requests_mock, "kept")
+
+    _postrun()
+
+    assert poweroff == []
+
+
+def test_postrun_powers_off_when_the_release_fails(poweroff, requests_mock):
+    _release_api(requests_mock, "failed")
+
+    _postrun()
+
+    assert poweroff == ["poweroff"]
+
+
+def test_postrun_powers_off_when_the_api_is_unreachable(poweroff, requests_mock):
+    requests_mock.post(f"{API_URL}{RELEASE_PATH}", status_code=503)
+
+    _postrun()
+
+    assert poweroff == ["poweroff"]
+
+
+def test_postrun_powers_off_on_a_malformed_task(poweroff, requests_mock):
+    """No kwargs to build an API client from: still never leak the instance."""
     sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
-
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
-
-    assert "terminated" in postrun
-
-
-def test_postrun_releases_scale_in_protection_before_terminating(postrun):
-    """
-    Order matters: TerminateInstanceInAutoScalingGroup refuses to terminate a
-    protected instance, which would strand it in the ASG.
-    """
-    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
-
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
-
-    assert postrun == ["protected=False", "terminated"]
-
-
-def test_postrun_skips_self_terminate_when_asked(postrun):
-    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
-
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
-
-    assert "terminated" not in postrun
-
-
-def test_postrun_releases_scale_in_protection_even_when_not_terminating(postrun):
-    """A protected instance can't be scaled in either — never leave it set."""
-    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
-
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
-
-    assert postrun == ["protected=False"]
-
-
-def test_postrun_ignores_other_tasks(postrun):
-    """Only run_build owns the instance; nothing else may touch it."""
-    sender = types.SimpleNamespace(name="some.other.task")
 
     tasks._on_run_build_postrun(sender, kwargs={})
 
-    assert postrun == []
+    assert poweroff == ["poweroff"]
+
+
+def test_postrun_keeps_a_debugging_instance_when_the_release_fails(poweroff, requests_mock):
+    _release_api(requests_mock, "failed")
+
+    _postrun(no_self_terminate=True)
+
+    assert poweroff == []
+
+
+def test_postrun_ignores_other_tasks(poweroff, requests_mock):
+    """Only run_build owns the instance; nothing else may touch it."""
+    _postrun(sender_name="some.other.task")
+
+    assert requests_for(requests_mock, "POST", RELEASE_PATH) == []
+    assert poweroff == []
 
 
 # ---------------------------------------------------------------------------

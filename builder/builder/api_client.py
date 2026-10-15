@@ -36,6 +36,8 @@ def setup_api(
     api_url: str,
     build_api_key: str,
     production_domain: str | None = None,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    retries: int = 3,
 ) -> slumber.API:
     """
     Build a slumber client pointed at the RTD API v2.
@@ -52,15 +54,15 @@ def setup_api(
 
     session = requests.Session()
     retry = Retry(
-        total=3,
-        read=3,
-        connect=3,
-        status=3,
+        total=retries,
+        read=retries,
+        connect=retries,
+        status=retries,
         backoff_factor=0.5,
         allowed_methods=("GET", "PUT", "PATCH", "POST"),
         status_forcelist=(408, 413, 429, 500, 502, 503, 504),
     )
-    session.mount(api_url, TimeoutHTTPAdapter(max_retries=retry))
+    session.mount(api_url, TimeoutHTTPAdapter(max_retries=retry, timeout=timeout_seconds))
     session.headers["Authorization"] = f"Token {build_api_key}"
 
     if production_domain:

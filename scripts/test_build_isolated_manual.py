@@ -25,7 +25,7 @@ Prereqs (one-time, currently set up by hand):
      (salt/base/utils/ops/build-isolated/). The AMI has
      /usr/src/builder/runner-venv + /usr/src/builder/uv-python pre-built by the boot-time
      setup unit, and /usr/src/builder/worker-venv populated with the celery
-     worker + boto3 + Sentry + New Relic.
+     worker + Sentry + New Relic.
   2. Launch template re-pointed at the new AMI.
   3. At least one instance running in the ``build-isolated`` ASG
      from the new AMI. Verify with::
@@ -54,11 +54,11 @@ BUILD_PK = 33580637
 TASK_NAME = "worker.tasks.run_build"
 QUEUE = "build:isolated"
 
-# Per-project debug flag. Set to True to ask the worker to skip
-# autoscaling:TerminateInstanceInAutoScalingGroup after the task,
-# leaving the instance alive for inspection. Set to False to test the
-# self-terminate path (instance disappears from the ASG ~30s after the
-# task ends; the ASG launches a replacement).
+# Per-project debug flag. The API keeps the instance alive when the project
+# has KEEP_BUILD_ISOLATED_INSTANCE; this only stops the worker's power-off
+# fallback if the API can't be reached. Set to False to test the release
+# path (instance disappears from the ASG ~30s after the task ends; the ASG
+# launches a replacement).
 NO_SELF_TERMINATE = True
 
 

@@ -89,7 +89,7 @@ app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
 #
 # Soft, not hard: the soft limit raises SoftTimeLimitExceeded *inside* the task,
 # so run_build stops the container, fails the Build, and lets task_postrun fire
-# — which is what self-terminates the instance. A hard limit SIGKILLs the child
+# — which is what releases the instance. A hard limit SIGKILLs the child
 # instead, so postrun never runs and the EC2 instance leaks. The hard limit is
 # kept 20% above as a backstop for a task that ignores the soft one.
 TASK_TIME_LIMIT = int(os.environ.get("RTD_BUILDS_TASK_TIME_LIMIT", "7200"))
