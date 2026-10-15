@@ -50,6 +50,7 @@ from worker.docker import get_client
 from worker.docker import start_container
 from worker.docker import start_healthcheck
 from worker.docker import stop_container
+from worker.ec2 import ensure_warm_buffer
 from worker.ec2 import self_terminate
 from worker.ec2 import set_scale_in_protection
 from worker.exceptions import BuildAppError
@@ -249,6 +250,8 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
     # Keep the ASG from scaling this instance out from under the build.
     # Released in task_postrun, which must happen before self_terminate.
     set_scale_in_protection(True)
+    # This instance just stopped being idle; launch a replacement if short.
+    ensure_warm_buffer()
 
     # We need the API client for both the happy path AND the fail path,
     # so build it before entering the try/except.
