@@ -25,12 +25,14 @@ def test_protect_never_raises(api_client, requests_mock):
     assert instance.protect(api_client, 42, HOSTNAME) is False
 
 
-def test_protect_skips_under_docker_compose(api_client, requests_mock, monkeypatch):
+def test_protect_calls_the_api_under_docker_compose_too(api_client, requests_mock, monkeypatch):
+    """The API decides what development means; the worker behaves like production."""
     monkeypatch.setenv("RTD_DOCKER_COMPOSE", "1")
+    requests_mock.post(PROTECT_URL, status_code=204)
 
-    assert instance.protect(api_client, 42, HOSTNAME) is False
+    assert instance.protect(api_client, 42, "3f9a1c2b7d4e") is True
 
-    assert requests_mock.call_count == 0
+    assert requests_mock.last_request.json() == {"builder": "3f9a1c2b7d4e"}
 
 
 def test_release_returns_the_state_the_api_decided(api_client, requests_mock):
@@ -51,12 +53,13 @@ def test_release_fails_on_an_unexpected_payload(api_client, requests_mock):
     assert instance.release(api_client, 42) == "failed"
 
 
-def test_release_keeps_the_instance_under_docker_compose(api_client, requests_mock, monkeypatch):
+def test_release_calls_the_api_under_docker_compose_too(api_client, requests_mock, monkeypatch):
     monkeypatch.setenv("RTD_DOCKER_COMPOSE", "1")
+    requests_mock.post(RELEASE_URL, json={"state": "kept", "decremented": False}, headers=JSON)
 
     assert instance.release(api_client, 42) == "kept"
 
-    assert requests_mock.call_count == 0
+    assert requests_mock.call_count == 1
 
 
 def test_poweroff_shuts_the_host_down(monkeypatch):

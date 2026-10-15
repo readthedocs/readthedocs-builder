@@ -2,9 +2,10 @@
 EC2 instance lifecycle, delegated to the Read the Docs API.
 
 The instance holds no AWS credentials. ``protect`` and ``release`` hit the
-``instance/*`` build endpoints and the web tier makes the Auto Scaling calls.
-``poweroff`` is the fallback when the API can't be reached: the launch
-template terminates the instance on shutdown.
+``instance/*`` build endpoints and the web tier makes the Auto Scaling calls,
+or skips them in development: the worker always calls the API so dev matches
+production. ``poweroff`` is the fallback when the API can't be reached: the
+launch template terminates the instance on shutdown.
 """
 
 import os
@@ -30,10 +31,6 @@ def _is_docker_compose() -> bool:
 
 def protect(api_client, build_pk: int, hostname: str) -> bool:
     """Claim ``build_pk`` for this instance and protect it from ASG scale-in."""
-    if _is_docker_compose():
-        log.info("Skipping scale-in protection under docker-compose.")
-        return False
-
     try:
         api_client.build(build_pk).instance.protect.post({"builder": hostname})
     except Exception:
@@ -52,10 +49,6 @@ def release(api_client, build_pk: int) -> str:
     Returns ``terminated``, ``kept`` or ``failed``. Only ``failed`` (or an
     unreachable API) should make the caller power off the host.
     """
-    if _is_docker_compose():
-        log.info("Skipping instance release under docker-compose.")
-        return STATE_KEPT
-
     try:
         response = api_client.build(build_pk).instance.release.post() or {}
     except Exception:
