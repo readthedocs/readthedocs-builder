@@ -52,6 +52,7 @@ from worker.docker import start_healthcheck
 from worker.docker import stop_container
 from worker.ec2 import self_terminate
 from worker.ec2 import set_scale_in_protection
+from worker.exceptions import BuildAlreadyFinished
 from worker.exceptions import BuildAppError
 from worker.exceptions import BuildUserError
 from worker.exceptions import PreContainerFailure
@@ -271,6 +272,8 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                 build=build,
                 version=version,
             )
+        except BuildAlreadyFinished:
+            return
         except BuildCancelled:
             _cancel_build(api_client, build_pk)
             return
@@ -400,6 +403,11 @@ def _fetch_build(api_client, build_pk):
     if build.get("state") == "cancelled":
         log.info("Build already cancelled. Skipping.", build_pk=build_pk)
         raise BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
+
+    # Duplicate delivery (e.g. broker redelivery) of a build that already finished.
+    if build.get("state") == "finished":
+        log.info("Build already finished. Skipping.", build_pk=build_pk)
+        raise BuildAlreadyFinished()
 
     version_pk = build.get("version")
     if not version_pk:

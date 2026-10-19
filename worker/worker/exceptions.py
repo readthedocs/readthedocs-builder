@@ -37,3 +37,8 @@ class PreContainerFailure(Exception):
         self.message_id = message_id
         self.format_values = format_values or {}
         super().__init__(log_message or message_id)
+
+
+class BuildAlreadyFinished(Exception):
+    """Exception raised when building a build that has already finished."""
+    pass
