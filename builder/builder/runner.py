@@ -567,7 +567,7 @@ class Runner:
                     "size": size_mb,
                     "limit": limit_mb,
                 },
-                dismissable=True,
+                dismissable=False,
             )
         except Exception:
             log.exception("Error attaching size limit notification.")
