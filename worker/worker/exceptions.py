@@ -24,7 +24,7 @@ class PreContainerFailure(Exception):
 
     ``run_build`` catches this at the top level, PATCHes the Build to
     finished/success=False and POSTs a notification, then returns normally so
-    ``task_postrun`` still fires and the instance self-terminates.
+    ``task_postrun`` still fires and the instance is released.
     """
 
     def __init__(

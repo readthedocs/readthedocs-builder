@@ -1063,7 +1063,6 @@ name = "worker"
 version = "0.0.0"
 source = { editable = "worker" }
 dependencies = [
-    { name = "boto3" },
     { name = "builder" },
     { name = "celery" },
     { name = "docker" },
@@ -1088,7 +1087,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.43.100" },
     { name = "builder", editable = "builder" },
     { name = "celery", specifier = ">=5.3,<6.0" },
     { name = "docker", specifier = ">=7.1" },
