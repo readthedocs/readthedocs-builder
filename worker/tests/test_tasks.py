@@ -10,6 +10,7 @@ from conftest import API_URL
 from conftest import JSON
 from worker import constants
 from worker import tasks
+from worker.exceptions import BuildAlreadyFinished
 from worker.exceptions import BuildAppError
 from worker.exceptions import BuildUserError
 from worker.exceptions import PreContainerFailure
@@ -282,6 +283,22 @@ def test_fetch_build_raises_cancelled_when_the_build_was_cancelled_while_queued(
         tasks._fetch_build(api_client, 42)
 
     # Stops before the version is fetched.
+    assert not requests_for(requests_mock, "GET", "/api/v2/version/10/")
+
+
+def test_fetch_build_raises_already_finished_when_the_build_already_completed(
+    api_client, requests_mock
+):
+    # A redelivered task for a finished build must not reset or rebuild it.
+    requests_mock.get(
+        f"{API_URL}/api/v2/build/42/",
+        json={"id": 42, "version": 10, "state": "finished"},
+        headers=JSON,
+    )
+
+    with pytest.raises(BuildAlreadyFinished):
+        tasks._fetch_build(api_client, 42)
+
     assert not requests_for(requests_mock, "GET", "/api/v2/version/10/")
 
 
