@@ -41,4 +41,5 @@ class PreContainerFailure(Exception):
 
 class BuildAlreadyFinished(Exception):
     """Exception raised when building a build that has already finished."""
+
     pass
