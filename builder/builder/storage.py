@@ -242,7 +242,7 @@ class BuildMediaStorage(_S3StorageBase):
         """
         Upload the single local file ``source`` to the key ``destination``.
 
-        Used for the generated parse artifacts, which land under the version's
+        Used for the generated manifest, which lands under the version's
         ``diff/`` prefix next to server-written files — a directory sync there
         would delete them, so each file is uploaded on its own.
         """

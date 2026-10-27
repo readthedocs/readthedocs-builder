@@ -509,9 +509,10 @@ def test_upload_artifacts_survives_delete_failures(docroot):
     storage.rclone_sync_directory.assert_called_once()
 
 
-def test_upload_artifacts_uploads_the_parse_artifacts(docroot):
-    # A build with HTML also ships the file tree diff manifest and the
-    # search payload, uploaded file-by-file under the ``diff/`` prefix.
+def test_upload_artifacts_uploads_the_manifest_after_the_html_sync(docroot):
+    # A build with HTML also ships the file tree diff manifest, parsed while
+    # the HTML syncs and uploaded as a single file under ``diff/`` once the
+    # sync is done.
     runner = Runner(make_director().data)
     _valid_html(runner)
     patcher, storage = _patch_storage()
@@ -519,23 +520,17 @@ def test_upload_artifacts_uploads_the_parse_artifacts(docroot):
     with patcher:
         runner._upload_artifacts(["html"])
 
-    uploaded = {call.args[1] for call in storage.upload_file.call_args_list}
-    assert uploaded == {
-        "diff/pip/latest/manifest.json",
-        "diff/pip/latest/search.jsonl.gz",
-    }
-    # The generated manifest carries this build's id.
-    manifest_source = next(
-        call.args[0]
-        for call in storage.upload_file.call_args_list
-        if call.args[1].endswith("manifest.json")
-    )
+    calls = [call[0] for call in storage.mock_calls]
+    assert calls.index("rclone_sync_directory") < calls.index("upload_file")
+    storage.upload_file.assert_called_once()
+    manifest_source, destination = storage.upload_file.call_args.args
+    assert destination == "diff/pip/latest/manifest.json"
     manifest = json.loads(Path(manifest_source).read_text())
     assert manifest["build"] == {"id": runner.data.build["id"]}
     assert list(manifest["files"]) == ["index.html"]
 
 
-def test_upload_artifacts_skips_the_parse_artifacts_without_html(docroot):
+def test_upload_artifacts_skips_the_manifest_without_html(docroot):
     runner = Runner(make_director().data)
     patcher, storage = _patch_storage()
 
@@ -545,10 +540,10 @@ def test_upload_artifacts_skips_the_parse_artifacts_without_html(docroot):
     storage.upload_file.assert_not_called()
 
 
-def test_upload_parse_artifact_errors_do_not_fail_the_build(docroot):
-    # Without this build's manifest in storage the server regenerates
-    # everything in ``index_build``, so a parse failure must never fail
-    # an otherwise-good build.
+def test_upload_manifest_errors_do_not_fail_the_build(docroot):
+    # Without this build's manifest in storage the server regenerates it in
+    # ``index_build``, so a manifest failure must never fail an
+    # otherwise-good build.
     runner = Runner(make_director().data)
     _valid_html(runner)
     patcher, storage = _patch_storage()
@@ -558,6 +553,21 @@ def test_upload_parse_artifact_errors_do_not_fail_the_build(docroot):
         runner._upload_artifacts(["html"])
 
     storage.rclone_sync_directory.assert_called_once()
+
+
+def test_manifest_parse_errors_do_not_fail_the_build(docroot):
+    runner = Runner(make_director().data)
+    _valid_html(runner)
+    patcher, storage = _patch_storage()
+
+    with (
+        patcher,
+        mock.patch("builder.parse.generate_manifest", side_effect=RuntimeError("boom")),
+    ):
+        runner._upload_artifacts(["html"])
+
+    storage.rclone_sync_directory.assert_called_once()
+    storage.upload_file.assert_not_called()
 
 
 def test_validate_artifacts_leaves_an_already_named_file_alone(docroot):

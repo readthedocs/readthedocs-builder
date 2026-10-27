@@ -1,14 +1,14 @@
-"""Tests for the generated parse artifacts (manifest + search payload)."""
+"""Tests for the generated file tree diff manifest."""
 
-import gzip
 import json
+import os
 
 from builder.parse import HASHER_VERSION
 from builder.parse import MANIFEST_FILE_NAME
-from builder.parse import PARSER_VERSION
-from builder.parse import SEARCH_PAYLOAD_FILE_NAME
-from builder.parse import SEARCH_PAYLOAD_SCHEMA_VERSION
-from builder.parse import generate_parse_artifacts
+from builder.parse import generate_manifest
+
+
+PAGE = "<html><head><title>Test</title></head><body><h1 id='t'>Test</h1><p>Hello</p></body></html>"
 
 
 def _generate(tmp_path, pages):
@@ -19,43 +19,26 @@ def _generate(tmp_path, pages):
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(content)
 
-    output_path = tmp_path / "diff"
-    filenames = generate_parse_artifacts(
+    manifest_path = generate_manifest(
         project_slug="pip",
         version_slug="latest",
         build_id=42,
         html_path=str(html_path),
-        output_path=str(output_path),
+        output_path=str(tmp_path / "diff"),
     )
-    return output_path, filenames
-
-
-def _read_payload(output_path):
-    with gzip.open(output_path / SEARCH_PAYLOAD_FILE_NAME, "rt") as f:
-        lines = [json.loads(line) for line in f]
-    return lines[0], lines[1:]
-
-
-PAGE = "<html><head><title>Test</title></head><body><h1 id='t'>Test</h1><p>Hello</p></body></html>"
-
-
-def test_generates_both_artifacts(tmp_path):
-    output_path, filenames = _generate(tmp_path, {"index.html": PAGE})
-
-    assert filenames == [MANIFEST_FILE_NAME, SEARCH_PAYLOAD_FILE_NAME]
-    assert (output_path / MANIFEST_FILE_NAME).exists()
-    assert (output_path / SEARCH_PAYLOAD_FILE_NAME).exists()
+    return html_path, manifest_path
 
 
 def test_manifest_matches_server_format(tmp_path):
     # The structure ``readthedocs.filetreediff.dataclasses.FileTreeDiffManifest``
     # reads back with ``from_dict`` and writes with ``as_dict``.
-    output_path, __ = _generate(
+    __, manifest_path = _generate(
         tmp_path,
         {"index.html": PAGE, "api/index.html": PAGE, "skipped.txt": "not html"},
     )
 
-    manifest = json.loads((output_path / MANIFEST_FILE_NAME).read_text())
+    assert manifest_path == str(tmp_path / "diff" / MANIFEST_FILE_NAME)
+    manifest = json.loads(open(manifest_path).read())
 
     assert manifest["build"] == {"id": 42}
     assert manifest["hasher_version"] == HASHER_VERSION
@@ -69,37 +52,35 @@ def test_manifest_matches_server_format(tmp_path):
     assert entry["text_hash"] == manifest["files"]["api/index.html"]["text_hash"]
 
 
-def test_payload_header_and_pages(tmp_path):
-    output_path, __ = _generate(
-        tmp_path,
-        {"b.html": PAGE, "a.html": PAGE},
-    )
-
-    header, pages = _read_payload(output_path)
-
-    assert header["schema_version"] == SEARCH_PAYLOAD_SCHEMA_VERSION
-    assert header["parser_version"] == PARSER_VERSION
-    assert header["hasher_version"] == HASHER_VERSION
-    assert header["build_id"] == 42
-    assert header["project"] == "pip"
-    assert header["version"] == "latest"
-    assert header["created"]
-
-    # One line per page, sorted for deterministic output.
-    assert [page["path"] for page in pages] == ["a.html", "b.html"]
-    assert pages[0]["title"] == "Test"
-    assert pages[0]["sections"] == [{"id": "t", "title": "Test", "content": "Hello"}]
-    assert pages[0]["text_hash"]
-
-
-def test_no_html_pages_writes_empty_artifacts(tmp_path):
+def test_no_html_pages_writes_an_empty_manifest(tmp_path):
     # An HTML dir without pages still produces a (valid, empty) manifest:
     # the server skips regenerating it and runs the side effects as usual.
-    output_path, __ = _generate(tmp_path, {"only.txt": "no html here"})
+    __, manifest_path = _generate(tmp_path, {"only.txt": "no html here"})
 
-    manifest = json.loads((output_path / MANIFEST_FILE_NAME).read_text())
+    manifest = json.loads(open(manifest_path).read())
     assert manifest["files"] == {}
+    assert manifest["build"] == {"id": 42}
 
-    header, pages = _read_payload(output_path)
-    assert header["build_id"] == 42
-    assert pages == []
+
+def test_symlinks_are_never_followed(tmp_path):
+    # The build can put anything in its output directory, including a link
+    # to a file outside it. The parse runs outside the container, so it
+    # must only ever read regular files.
+    secret = tmp_path / "secret.html"
+    secret.write_text(PAGE)
+    html_path = tmp_path / "html"
+    html_path.mkdir()
+    (html_path / "index.html").write_text(PAGE)
+    os.symlink(secret, html_path / "linked.html")
+    os.symlink(tmp_path, html_path / "linked-dir")
+
+    manifest_path = generate_manifest(
+        project_slug="pip",
+        version_slug="latest",
+        build_id=42,
+        html_path=str(html_path),
+        output_path=str(tmp_path / "diff"),
+    )
+
+    manifest = json.loads(open(manifest_path).read())
+    assert list(manifest["files"]) == ["index.html"]

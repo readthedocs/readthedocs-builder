@@ -1,5 +1,5 @@
 """
-HTML parser for the file tree diff manifest and the search payload.
+HTML parser for the file tree diff manifest.
 
 Ported from ``readthedocs/search/parsers.py``. The parsing logic is kept
 line-for-line identical so both sides produce the same output for the same
