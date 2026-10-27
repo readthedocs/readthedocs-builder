@@ -7,16 +7,12 @@ requires-python = ">=3.11"
 dependencies = [
     # Celery + broker.
     "celery>=5.3,<6.0",
-    "redis>=5.0,<6.0",
-
-    # Self-terminate via autoscaling:TerminateInstanceInAutoScalingGroup +
-    # the ec2:describe_instance calls that back it up.
-    "boto3>=1.43.95",
+    "redis>=8.1.0,<9.0",
 
     # Structured logging shared with the runner. Emits JSON in prod.
     "structlog>=25.0",
 
-    # IMDS calls in worker/ec2.py.
+    # HTTP layer under slumber and docker.
     "requests>=2.31",
 
     # .readthedocs.yaml parsing (worker/tasks.py sparse-clones the yaml to

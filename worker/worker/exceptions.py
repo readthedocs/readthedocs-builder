@@ -24,7 +24,7 @@ class PreContainerFailure(Exception):
 
     ``run_build`` catches this at the top level, PATCHes the Build to
     finished/success=False and POSTs a notification, then returns normally so
-    ``task_postrun`` still fires and the instance self-terminates.
+    ``task_postrun`` still fires and the instance is released.
     """
 
     def __init__(
@@ -37,3 +37,9 @@ class PreContainerFailure(Exception):
         self.message_id = message_id
         self.format_values = format_values or {}
         super().__init__(log_message or message_id)
+
+
+class BuildAlreadyFinished(Exception):
+    """Exception raised when building a build that has already finished."""
+
+    pass

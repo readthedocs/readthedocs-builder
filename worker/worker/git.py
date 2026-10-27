@@ -74,8 +74,13 @@ def _with_clone_token(repo_url: str, env: dict) -> str:
 
     For public repos the token is empty, the URL becomes ``https://@host/…``
     and git falls back to anonymous access. Never log the result.
+
+    Only HTTP(S) carries userinfo: ``git://@host/…`` is rejected by git, so
+    other schemes are returned untouched.
     """
     parsed = urlparse(repo_url)
+    if parsed.scheme not in ("http", "https"):
+        return repo_url
     token = env.get("READTHEDOCS_GIT_CLONE_TOKEN", "")
     return f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
 

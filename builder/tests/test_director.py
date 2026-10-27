@@ -9,7 +9,6 @@ client — and each decomposed method is asserted independently. See
 """
 
 import os
-import stat
 from pathlib import Path
 from unittest import mock
 
@@ -17,7 +16,6 @@ import pytest
 from conftest import make_director
 
 from builder import binaries
-from builder import settings
 from builder.constants import GENERIC
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildUserError
@@ -76,29 +74,24 @@ def test_git_ssh_command_added_only_for_private_repos(docroot):
 # ---------------------------------------------------------------------------
 
 
-def _run_creating_dirs(director, output=""):
-    """
-    Make the mocked VCS environment carry out ``mkdir`` for real.
-
-    ``_write_ssh_key`` creates the key's directory *through the environment*,
-    so that it belongs to the build user rather than to whoever the runner is.
-    A mock that only records the call leaves nowhere to write the key.
-    """
-    result = mock.MagicMock()
-    result.output = output
-
-    def _run(*args, **kwargs):
-        if args and args[0] == binaries.MKDIR:
-            os.makedirs(args[-1], exist_ok=True)
-        return result
-
-    director.vcs_environment.run.side_effect = _run
-    return result
-
-
 def _calls_named(director, name):
     """Every recorded command whose first argument is ``name``."""
     return [c for c in director.vcs_environment.run.call_args_list if c.args and c.args[0] == name]
+
+
+def _ssh_add_call(director):
+    """The ``ssh-add`` shell expression, which carries the binary inside a single argument."""
+    (call,) = [
+        c for c in director.vcs_environment.run.call_args_list if binaries.CONTAINER_SSH_ADD in c.args[0]
+    ]
+    return call
+
+
+def _private_repo_director(key="PRIVATE-KEY-CONTENT"):
+    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
+    director.data.api_client.project.return_value.key.get.return_value = {"private_key": key}
+    director.vcs_environment.run.return_value.output = _agent_output()
+    return director
 
 
 def _agent_output():
@@ -133,11 +126,7 @@ def test_setup_ssh_agent_skips_when_project_has_no_key(docroot, monkeypatch):
 
 def test_setup_ssh_agent_loads_key_and_injects_env(docroot, monkeypatch):
     monkeypatch.setenv("RTD_BUILD_TIME_LIMIT_SECONDS", "900")
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    director.data.api_client.project.return_value.key.get.return_value = {
-        "private_key": "PRIVATE-KEY-CONTENT",
-    }
-    _run_creating_dirs(director, output=_agent_output())
+    director = _private_repo_director()
 
     director.setup_ssh_agent()
 
@@ -150,71 +139,29 @@ def test_setup_ssh_agent_loads_key_and_injects_env(docroot, monkeypatch):
 
     # ssh-agent started, then the key added with a TTL that outlasts the limit.
     assert _calls_named(director, binaries.CONTAINER_SSH_AGENT)[0].args == (binaries.CONTAINER_SSH_AGENT, "-s")
-    add_args = _calls_named(director, binaries.CONTAINER_SSH_ADD)[0].args
-    assert add_args[1] == "-t"
-    assert int(add_args[2]) > 900
+    (ssh_add,) = _ssh_add_call(director).args
+    ttl = int(ssh_add.split(" -t ")[1].split()[0])
+    assert ttl > 900
 
 
-def test_ssh_key_is_written_inside_the_docroot(docroot, monkeypatch):
+def test_setup_ssh_agent_pipes_the_key_from_an_env_var(docroot):
     """
-    ``ssh-add`` runs inside the build container; the runner writes the key here.
+    The key never touches disk: ``printf`` pipes it into ``ssh-add -``.
 
-    The docroot is the only path mounted into the container, and it's mounted
-    at the same path on both sides — so a key written anywhere else (a host
-    temp file, say) simply doesn't exist for ``ssh-add``.
+    It travels as ``extra_env`` so it's masked from any recorded output, and
+    the command is a literal shell expression of ours, so it's safe to leave
+    unescaped.
     """
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    _run_creating_dirs(director)
-
-    key_path = Path(director._write_ssh_key("PRIVATE-KEY-CONTENT"))
-
-    assert key_path.is_relative_to(Path(settings.DOCROOT))
-    assert key_path.read_text() == "PRIVATE-KEY-CONTENT"
-
-
-def test_ssh_key_is_never_readable_by_anyone_else(docroot, monkeypatch):
-    """It lands on a path the build container can see, so keep it 0400."""
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    _run_creating_dirs(director)
-
-    key_path = Path(director._write_ssh_key("PRIVATE-KEY-CONTENT"))
-
-    assert stat.S_IMODE(key_path.stat().st_mode) == 0o400
-
-
-def test_setup_ssh_agent_passes_the_docroot_path_to_ssh_add(docroot, monkeypatch):
-    """The path handed to ``ssh-add`` has to resolve inside the container."""
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    director.data.api_client.project.return_value.key.get.return_value = {
-        "private_key": "PRIVATE-KEY-CONTENT",
-    }
-    _run_creating_dirs(director, output=_agent_output())
+    director = _private_repo_director()
 
     director.setup_ssh_agent()
 
-    ssh_add_path = Path(_calls_named(director, binaries.CONTAINER_SSH_ADD)[0].args[3])
-    assert ssh_add_path.is_relative_to(Path(settings.DOCROOT))
-
-
-def test_setup_ssh_agent_deletes_the_key_file(docroot, monkeypatch):
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    director.data.api_client.project.return_value.key.get.return_value = {
-        "private_key": "PRIVATE-KEY-CONTENT",
-    }
-    _run_creating_dirs(director, output=_agent_output())
-
-    written = []
-    real_write = director._write_ssh_key
-
-    def _spy(private_key):
-        path = real_write(private_key)
-        written.append(path)
-        return path
-
-    monkeypatch.setattr(director, "_write_ssh_key", _spy)
-    director.setup_ssh_agent()
-
-    assert written and not os.path.exists(written[0])
+    call = _ssh_add_call(director)
+    ttl = director._ssh_key_ttl()
+    assert call.args == (f'printf "%s\\n" "$READTHEDOCS_PRIVATE_SSH_KEY" | /usr/bin/ssh-add -t {ttl} -',)
+    assert call.kwargs["extra_env"] == {"READTHEDOCS_PRIVATE_SSH_KEY": "PRIVATE-KEY-CONTENT"}
+    assert call.kwargs["escape_command"] is False
+    assert call.kwargs["record"] is False
 
 
 def test_ssh_agent_env_flows_into_build_env_vars(docroot):
@@ -1155,51 +1102,6 @@ def test_store_build_yaml_ignores_malformed_yaml(docroot):
         fh.write("a: b: c: invalid")
     director.store_readthedocs_build_yaml()  # must not raise
     assert director.data.version.build_data is None
-
-
-def test_ssh_key_directory_is_created_by_the_build_user(docroot):
-    """
-    Through the environment, not from Python.
-
-    The runner and the build container are the same user in production but not
-    in dev, so a directory created here would be root-owned there — and the
-    checkout that follows writes into it as ``docs``.
-    """
-    director = make_director(
-        SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True
-    )
-    _run_creating_dirs(director)
-
-    director._write_ssh_key("PRIVATE-KEY-CONTENT")
-
-    mkdir = _calls_named(director, binaries.MKDIR)[0]
-    assert mkdir.args[-1].endswith("/checkouts")
-    # A swallowed failure here surfaces much later, as a checkout that can't
-    # create its working directory.
-    assert mkdir.kwargs["warn_only"] is False
-
-
-def test_ssh_key_is_chowned_to_the_build_user_by_id(docroot, monkeypatch):
-    """
-    By numeric id, because the name may not resolve here.
-
-    The dev compose service has no ``docs`` in its passwd db; a failed lookup
-    used to skip the chown silently, leaving ``ssh-add`` unable to read the key.
-    """
-    director = make_director(
-        SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True
-    )
-    _run_creating_dirs(director)
-
-    monkeypatch.setattr("builder.director.pwd.getpwnam", mock.Mock(side_effect=KeyError))
-    monkeypatch.setattr("builder.settings.RTD_DOCKER_UID", 1005)
-    monkeypatch.setattr("builder.settings.RTD_DOCKER_GID", 205)
-    chowned = []
-    monkeypatch.setattr("builder.director.os.chown", lambda p, u, g: chowned.append((u, g)))
-
-    director._write_ssh_key("PRIVATE-KEY-CONTENT")
-
-    assert chowned == [(1005, 205)]
 
 
 # ---------------------------------------------------------------------------

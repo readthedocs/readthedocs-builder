@@ -6,9 +6,6 @@ all intentional:
 
 - The builder storage is S3-only (no local backend), so ``boto3.client`` is
   stubbed rather than exercising a real bucket.
-- Upstream's symlink / outside-docroot ``_check_suspicious_path`` guard was
-  dropped (each build is isolated with its own scoped credentials), so those
-  tests don't apply; only the empty-destination guard is ported.
 """
 
 import gzip
@@ -138,13 +135,15 @@ def test_open_rejects_non_binary_mode():
 # ---------------------------------------------------------------------------
 
 
-def test_rclone_sync_delegates_to_rclone():
+def test_rclone_sync_delegates_to_rclone(docroot):
     storage = make_media_storage()
     # Pre-seed the cached_property so no real RCloneS3Remote is built.
     rclone = mock.MagicMock()
     storage.__dict__["_rclone"] = rclone
-    storage.rclone_sync_directory("/local/html", "html/latest")
-    rclone.sync.assert_called_once_with("/local/html", "html/latest")
+    source = docroot / "html"
+    source.mkdir()
+    storage.rclone_sync_directory(source, "html/latest")
+    rclone.sync.assert_called_once_with(source, "html/latest")
 
 
 @pytest.mark.parametrize("destination", ["", "/"])
@@ -152,6 +151,22 @@ def test_rclone_sync_refuses_to_wipe_the_bucket(destination):
     storage = make_media_storage()
     with pytest.raises(SuspiciousFileOperation):
         storage.rclone_sync_directory("/local/html", destination)
+
+
+def test_rclone_sync_source_symlink(docroot, tmp_path):
+    storage = make_media_storage()
+    symlink_dir = tmp_path / "files"
+    symlink_dir.symlink_to(docroot)
+    with pytest.raises(SuspiciousFileOperation, match="symbolic link"):
+        storage.rclone_sync_directory(symlink_dir, "files")
+
+
+def test_rclone_sync_source_outside_docroot(docroot, tmp_path):
+    storage = make_media_storage()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(SuspiciousFileOperation, match="outside the docroot"):
+        storage.rclone_sync_directory(outside, "files")
 
 
 def test_rclone_property_uses_generic_provider_for_custom_endpoint():
