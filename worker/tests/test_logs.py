@@ -25,7 +25,7 @@ def emit(capsys, monkeypatch):
 
 
 def test_json_format_renders_a_parsable_object(emit):
-    assert json.loads(emit("json", build_pk=42))["build_pk"] == 42
+    assert json.loads(emit("json", build_id=42))["build_id"] == 42
 
 
 def test_json_format_renames_event_to_message(emit):
@@ -59,7 +59,7 @@ def test_console_format_is_not_json(emit):
 
 def test_console_format_has_no_timestamp(emit):
     """Dev reads these under a compose prefix; the timestamp is just noise."""
-    assert "timestamp" not in emit("console", build_pk=42)
+    assert "timestamp" not in emit("console", build_id=42)
 
 
 def test_stdlib_loggers_are_rendered_too(capsys, monkeypatch):
