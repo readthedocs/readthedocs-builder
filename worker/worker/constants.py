@@ -38,8 +38,7 @@ RUN_BUILD_TASK_QUEUE = "build:isolated"
 # in readthedocs.org settings.
 RUN_BUILD_TASK_NAME = "worker.tasks.run_build"
 
-# Self-terminate shrinks the fleet only while at least this many other
-# instances are idle. The ASG's "Fleet warm buffer" policy (readthedocs-ops
-# ``scaling/policy.tf``) adds instances below 5, so idle floats between 5
-# and 9 and the two never act on the same value.
-WARM_BUFFER = 10
+# Idle instances to keep warm. Self-terminate shrinks the fleet only while at
+# least this many other instances are idle; mirrors the ``+ 5`` in the ASG
+# step ladder (readthedocs-ops ``scaling/policy.tf``).
+WARM_BUFFER = 5
