@@ -121,8 +121,13 @@ def set_scale_in_protection(protected: bool):
         )
 
 
-def _describe_group(client, asg_name: str) -> dict | None:
-    """The ASG as returned by ``DescribeAutoScalingGroups``, or ``None`` on failure."""
+def _idle_instances(client, asg_name: str, instance_id: str) -> int | None:
+    """
+    In-service instances in ``asg_name`` with no build on them, excluding ours.
+
+    A building instance holds scale-in protection (see ``run_build``), so
+    unprotected + InService means idle. Returns ``None`` if the lookup fails.
+    """
     try:
         groups = client.describe_auto_scaling_groups(
             AutoScalingGroupNames=[asg_name],
@@ -134,7 +139,14 @@ def _describe_group(client, asg_name: str) -> dict | None:
     if not groups:
         log.warning("Autoscaling group not found.", asg_name=asg_name)
         return None
-    return groups[0]
+
+    return sum(
+        1
+        for instance in groups[0].get("Instances", [])
+        if instance.get("InstanceId") != instance_id
+        and instance.get("LifecycleState") == "InService"
+        and not instance.get("ProtectedFromScaleIn")
+    )
 
 
 def _queued_builds() -> int | None:
@@ -160,59 +172,41 @@ def _queued_builds() -> int | None:
         return None
 
 
-def ensure_warm_buffer():
+def _should_decrement(client, instance_id: str) -> bool:
     """
-    Raise desired capacity so ``BUFFER`` idle instances stay ahead of demand.
+    Whether this instance should shrink the fleet when it terminates.
 
-    Called when a build starts.
-    Desired must cover every building instance (the protected ones, plus us),
-    every build still queued, and the buffer. This only ever raises desired:
-    a finished build removes its instance and its demand together.
+    Only while nothing is queued and the group already has ``WARM_BUFFER``
+    idle instances; otherwise it gets replaced so the next build lands on a
+    warm instance. Any failure answers ``False``: a replacement costs an
+    instance-minute, a missing one costs a build a cold boot.
+
+    The queue check comes first: freshly launched instances count as idle for
+    the ASG before the worker on them is ready, so right after a burst
+    scale-out the idle count alone would shrink the fleet under waiting builds.
     """
-    instance_id = _ec2_metadata("instance-id")
-    if not instance_id:
-        log.info("Skipping warm buffer: not running on EC2.")
-        return
+    queued = _queued_builds()
+    if queued is None or queued > 0:
+        log.info("Builds queued or queue unknown; replacing this instance.", queued=queued)
+        return False
 
-    client = _autoscaling_client()
     asg_name = _asg_name(client, instance_id)
     if not asg_name:
-        return
+        return False
 
-    group = _describe_group(client, asg_name)
-    if group is None:
-        return
+    idle = _idle_instances(client, asg_name, instance_id)
+    if idle is None:
+        return False
 
-    busy = {instance_id} | {
-        instance["InstanceId"]
-        for instance in group.get("Instances", [])
-        if instance.get("ProtectedFromScaleIn")
-    }
-    queued = _queued_builds() or 0
-    desired = group["DesiredCapacity"]
-    target = min(len(busy) + queued + constants.BUFFER, group["MaxSize"])
+    decrement = idle >= constants.WARM_BUFFER
     log.info(
         "Warm buffer checked.",
         asg_name=asg_name,
-        busy=len(busy),
-        queued=queued,
-        desired=desired,
-        target=target,
+        idle=idle,
+        warm_buffer=constants.WARM_BUFFER,
+        decrement=decrement,
     )
-
-    # Never reduce the desired capacity; only increase it if needed.
-    if target <= desired:
-        return
-
-    try:
-        client.set_desired_capacity(
-            AutoScalingGroupName=asg_name,
-            DesiredCapacity=target,
-            HonorCooldown=False,
-        )
-        log.info("Warm buffer lifted.", asg_name=asg_name, desired=desired, target=target)
-    except Exception:
-        log.exception("Failed to lift the warm buffer.", asg_name=asg_name, target=target)
+    return decrement
 
 
 def _is_at_min_size(exc: ClientError) -> bool:
@@ -236,8 +230,10 @@ def self_terminate():
     """
     Tell the ASG to terminate the EC2 instance we're running on.
 
-    Always decrements desired capacity.``ensure_warm_buffer`` refills the buffer
-    on the next build.
+    Decrements desired capacity when the group has spare idle instances, so a
+    finished build shrinks the fleet; otherwise the ASG replaces this instance
+    right away and the warm buffer holds. Policy-driven scale-in can't do this:
+    AWS refuses it while any launch is in progress, which under load is always.
 
     Off EC2 (dev) there's no instance id, so this is a no-op — no dedicated
     skip flag needed.
@@ -248,11 +244,12 @@ def self_terminate():
         return
 
     client = _autoscaling_client()
+    decrement = _should_decrement(client, instance_id)
     try:
-        _terminate(client, instance_id, True)
+        _terminate(client, instance_id, decrement)
         return
     except ClientError as exc:
-        if not _is_at_min_size(exc):
+        if not (decrement and _is_at_min_size(exc)):
             log.exception("Self-terminate failed.", instance_id=instance_id)
             return
     except Exception:

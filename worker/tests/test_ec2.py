@@ -209,11 +209,10 @@ def test_set_scale_in_protection_never_raises(imds, asg):
     assert ec2.set_scale_in_protection(True) is None
 
 
-def stub_group(stubber, *, idle=0, protected=0, self_protected=True, desired=None, max_size=100):
+def stub_group(stubber, *, idle=0, protected=0, include_self=True):
     """
     Stub ``describe_auto_scaling_groups`` with ``idle`` unprotected in-service
-    instances, ``protected`` building ones, and this instance. ``desired``
-    defaults to the number of instances.
+    instances, ``protected`` building ones, and (optionally) this instance.
     """
 
     def instance(instance_id, protected_from_scale_in):
@@ -227,7 +226,8 @@ def stub_group(stubber, *, idle=0, protected=0, self_protected=True, desired=Non
 
     instances = [instance(f"i-idle{n}", False) for n in range(idle)]
     instances += [instance(f"i-busy{n}", True) for n in range(protected)]
-    instances.append(instance(INSTANCE_ID, self_protected))
+    if include_self:
+        instances.append(instance(INSTANCE_ID, False))
 
     stubber.add_response(
         "describe_auto_scaling_groups",
@@ -236,8 +236,8 @@ def stub_group(stubber, *, idle=0, protected=0, self_protected=True, desired=Non
                 {
                     "AutoScalingGroupName": ASG_NAME,
                     "MinSize": 5,
-                    "MaxSize": max_size,
-                    "DesiredCapacity": len(instances) if desired is None else desired,
+                    "MaxSize": 100,
+                    "DesiredCapacity": len(instances),
                     "DefaultCooldown": 300,
                     "AvailabilityZones": ["us-east-2a"],
                     "HealthCheckType": "EC2",
@@ -258,131 +258,61 @@ def stub_terminate(stubber, decrement):
     )
 
 
-def stub_set_desired(stubber, desired):
-    stubber.add_response(
-        "set_desired_capacity",
-        {},
-        {
-            "AutoScalingGroupName": ASG_NAME,
-            "DesiredCapacity": desired,
-            "HonorCooldown": False,
-        },
-    )
-
-
-def test_ensure_warm_buffer_lifts_desired_to_cover_building_queued_and_buffer(imds, asg, queue):
-    """3 building + us + 2 queued + BUFFER, well above the 14 instances the group has."""
-    queue.length = 2
+def test_self_terminate_decrements_when_the_warm_buffer_is_full(imds, asg):
+    """Enough idle instances already: shrink the fleet instead of being replaced."""
     stub_describe(asg)
-    stub_group(asg, idle=10, protected=3)
-    stub_set_desired(asg, 4 + 2 + constants.BUFFER)
-
-    ec2.ensure_warm_buffer()
-
-    asg.assert_no_pending_responses()
-    assert queue.llen_calls == [constants.RUN_BUILD_TASK_QUEUE]
-
-
-def test_ensure_warm_buffer_holds_when_desired_already_covers_demand(imds, asg):
-    """Never lower desired: surplus idle instances are consumed by later claims."""
-    stub_describe(asg)
-    stub_group(asg, idle=constants.BUFFER + 5, protected=3)
-
-    ec2.ensure_warm_buffer()
-
-    asg.assert_no_pending_responses()
-
-
-def test_ensure_warm_buffer_counts_pending_launches_through_desired(imds, asg):
-    """Instances still launching are in desired but not in the instance list."""
-    stub_describe(asg)
-    stub_group(asg, idle=0, protected=3, desired=4 + constants.BUFFER)
-
-    ec2.ensure_warm_buffer()
-
-    asg.assert_no_pending_responses()
-
-
-def test_ensure_warm_buffer_counts_itself_as_building_even_if_unprotected(imds, asg):
-    stub_describe(asg)
-    stub_group(asg, idle=0, protected=0, self_protected=False)
-    stub_set_desired(asg, 1 + constants.BUFFER)
-
-    ec2.ensure_warm_buffer()
-
-    asg.assert_no_pending_responses()
-
-
-def test_ensure_warm_buffer_caps_at_max_size(imds, asg):
-    stub_describe(asg)
-    stub_group(asg, idle=0, protected=90, max_size=100)
-    stub_set_desired(asg, 100)
-
-    ec2.ensure_warm_buffer()
-
-    asg.assert_no_pending_responses()
-
-
-def test_ensure_warm_buffer_treats_a_failed_queue_lookup_as_empty(imds, asg, monkeypatch):
-    def from_url(url, **kwargs):
-        raise ConnectionError("broker down")
-
-    monkeypatch.setattr(ec2.redis.Redis, "from_url", staticmethod(from_url))
-    stub_describe(asg)
-    stub_group(asg, idle=0, protected=3)
-    stub_set_desired(asg, 4 + constants.BUFFER)
-
-    ec2.ensure_warm_buffer()
-
-    asg.assert_no_pending_responses()
-
-
-def test_ensure_warm_buffer_skips_when_the_group_lookup_fails(imds, asg):
-    stub_describe(asg)
-    asg.add_client_error("describe_auto_scaling_groups", service_error_code="AccessDenied")
-
-    assert ec2.ensure_warm_buffer() is None
-
-    asg.assert_no_pending_responses()
-
-
-def test_ensure_warm_buffer_skips_when_the_instance_has_no_asg(imds, asg):
-    asg.add_response(
-        "describe_auto_scaling_instances",
-        {"AutoScalingInstances": []},
-        {"InstanceIds": [INSTANCE_ID]},
-    )
-
-    assert ec2.ensure_warm_buffer() is None
-
-    asg.assert_no_pending_responses()
-
-
-def test_ensure_warm_buffer_skips_when_not_running_on_ec2(requests_mock, monkeypatch):
-    requests_mock.put(f"{ec2.IMDS_URL}/latest/api/token", exc=OSError("no route to host"))
-    monkeypatch.setattr(ec2, "_autoscaling_client", lambda: pytest.fail("must not be called"))
-
-    assert ec2.ensure_warm_buffer() is None
-
-
-def test_ensure_warm_buffer_never_raises(imds, asg):
-    """A failed lift must not fail the build; the next claim retries."""
-    stub_describe(asg)
-    stub_group(asg, idle=0, protected=3)
-    asg.add_client_error("set_desired_capacity", service_error_code="AccessDenied")
-
-    assert ec2.ensure_warm_buffer() is None
-
-
-def test_self_terminate_always_decrements_desired_capacity(imds, asg, queue):
-    """A finished build removes its instance and its demand together."""
+    stub_group(asg, idle=constants.WARM_BUFFER, protected=3)
     stub_terminate(asg, decrement=True)
 
     ec2.self_terminate()
 
-    # No describe calls were stubbed: there is no decision to make.
     asg.assert_no_pending_responses()
-    assert queue.llen_calls == []
+
+
+def test_self_terminate_is_replaced_when_the_warm_buffer_is_short(imds, asg):
+    """Too few idle instances: keep desired so the ASG launches a replacement now."""
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER - 1, protected=3)
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_does_not_count_itself_as_idle(imds, asg):
+    """Our own protection is already released by task_postrun; we're not spare capacity."""
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER - 1, include_self=True)
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_is_replaced_while_builds_are_queued(imds, asg, queue):
+    """Waiting builds mean the idle count lies (fresh instances still booting): never shrink."""
+    queue.length = 3
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    # No describe calls were stubbed: the queue check short-circuits them.
+    asg.assert_no_pending_responses()
+    assert queue.llen_calls == [constants.RUN_BUILD_TASK_QUEUE]
+
+
+def test_self_terminate_is_replaced_when_the_queue_lookup_fails(imds, asg, monkeypatch):
+    def from_url(url, **kwargs):
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(ec2.redis.Redis, "from_url", staticmethod(from_url))
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
 
 
 def test_queued_builds_disables_tls_verification_for_rediss(monkeypatch, queue):
@@ -399,8 +329,34 @@ def test_queued_builds_uses_plain_connection_for_redis(queue):
     assert "ssl_cert_reqs" not in queue.from_url_kwargs
 
 
+def test_self_terminate_is_replaced_when_the_group_lookup_fails(imds, asg):
+    """Unknown fleet state: a replacement is the safe default."""
+    stub_describe(asg)
+    asg.add_client_error("describe_auto_scaling_groups", service_error_code="AccessDenied")
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
+def test_self_terminate_is_replaced_when_the_instance_has_no_asg(imds, asg):
+    asg.add_response(
+        "describe_auto_scaling_instances",
+        {"AutoScalingInstances": []},
+        {"InstanceIds": [INSTANCE_ID]},
+    )
+    stub_terminate(asg, decrement=False)
+
+    ec2.self_terminate()
+
+    asg.assert_no_pending_responses()
+
+
 def test_self_terminate_without_decrement_at_min_size(imds, asg):
     """At MinSize AWS refuses the decrement; terminate anyway so the instance isn't stranded."""
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER)
     asg.add_client_error(
         "terminate_instance_in_auto_scaling_group",
         service_error_code="ValidationError",
@@ -408,10 +364,7 @@ def test_self_terminate_without_decrement_at_min_size(imds, asg):
             "Currently, desiredSize equals minSize (5). Terminating instance without "
             "replacement will violate group's min size constraint."
         ),
-        expected_params={
-            "InstanceId": INSTANCE_ID,
-            "ShouldDecrementDesiredCapacity": True,
-        },
+        expected_params={"InstanceId": INSTANCE_ID, "ShouldDecrementDesiredCapacity": True},
     )
     stub_terminate(asg, decrement=False)
 
@@ -421,6 +374,8 @@ def test_self_terminate_without_decrement_at_min_size(imds, asg):
 
 
 def test_self_terminate_does_not_retry_other_validation_errors(imds, asg, monkeypatch):
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER)
     asg.add_client_error(
         "terminate_instance_in_auto_scaling_group",
         service_error_code="ValidationError",
@@ -450,6 +405,8 @@ def test_self_terminate_skips_when_not_running_on_ec2(requests_mock, monkeypatch
 
 
 def test_self_terminate_never_raises(imds, asg):
+    stub_describe(asg)
+    stub_group(asg, idle=constants.WARM_BUFFER)
     asg.add_client_error(
         "terminate_instance_in_auto_scaling_group", service_error_code="AccessDenied"
     )
