@@ -1,3 +1,4 @@
+import os
 import pytest
 
 from worker.config import find_config_file
@@ -29,6 +30,39 @@ def test_find_config_file_uses_the_custom_yaml_path(tmp_path, write_config):
     found = find_config_file(str(tmp_path), yaml_path="subpath/.readthedocs.yaml")
 
     assert found == str(tmp_path / "subpath" / ".readthedocs.yaml")
+
+
+def test_find_config_file_allows_a_symlink_that_stays_inside_the_checkout(tmp_path, write_config):
+    """An in-checkout symlink is fine, matching ``builder.config.load``."""
+    write_config(tmp_path / "docs" / ".readthedocs.yaml", {"version": 2})
+    (tmp_path / "link.yaml").symlink_to(tmp_path / "docs" / ".readthedocs.yaml")
+
+    found = find_config_file(str(tmp_path), yaml_path="link.yaml")
+
+    assert found == str((tmp_path / "docs" / ".readthedocs.yaml"))
+
+
+def test_find_config_file_rejects_a_symlink_escaping_the_checkout(tmp_path, write_config):
+    """A ``.readthedocs.yaml`` committed as a symlink to a host file is ignored."""
+    outside = write_config(tmp_path / "outside" / "host.yaml", {"build": {"os": "leaked"}})
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".readthedocs.yaml").symlink_to(outside)
+
+    assert find_config_file(str(checkout)) is None
+
+
+def test_find_config_file_rejects_an_absolute_custom_yaml_path(tmp_path):
+    assert find_config_file(str(tmp_path), yaml_path="/etc/hostname") is None
+
+
+def test_find_config_file_rejects_a_dotdot_traversal_custom_yaml_path(tmp_path, write_config):
+    outside = write_config(tmp_path / "outside" / "host.yaml", {"build": {"os": "leaked"}})
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    relative = os.path.relpath(outside, checkout)  # ../outside/host.yaml
+
+    assert find_config_file(str(checkout), yaml_path=relative) is None
 
 
 def test_find_config_file_does_not_fall_back_when_custom_yaml_path_is_missing(
