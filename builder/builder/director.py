@@ -178,9 +178,7 @@ class BuildDirector:
             return
 
         try:
-            self.data.container_name = self.data.start_build_container(
-                self.data.config.build.os
-            )
+            self.data.container_name = self.data.start_build_container(self.data.config.build.os)
         except BuildCancelled:
             raise
         except Exception as exc:
