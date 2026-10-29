@@ -75,6 +75,12 @@ def test_start_container_uses_the_image_for_the_build_os(client):
     assert client.created["image"] == "readthedocs/build:ubuntu-22.04"
 
 
+def test_start_container_resolves_the_ubuntu_lts_latest_alias(client):
+    start_container(client, build_os="ubuntu-lts-latest")
+
+    assert client.created["image"] == "readthedocs/build:ubuntu-26.04"
+
+
 def test_start_container_passes_memory_straight_through(client):
     start_container(client, memory="3g")
 

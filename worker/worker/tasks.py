@@ -16,16 +16,14 @@
 
 Everything else — memory, time limit, docker image tag, command — is
 resolved here by fetching build/project data from the API and
-sparse-cloning ``.readthedocs.yaml``.
+starting a container to clone the repository in.
 """
 
 import contextlib
 import os
-import shutil
 import signal
 import socket
 import subprocess
-import tempfile
 
 import structlog
 from builder.api_client import get_build
@@ -38,7 +36,6 @@ from builder.exceptions import BuildCancelled
 from builder.lsremote import find_duplicate_reserved_versions
 from builder.lsremote import parse_lsremote
 from builder.refspec import EXTERNAL
-from builder.refspec import get_remote_fetch_refspec
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_postrun
 from celery.signals import task_received
@@ -46,7 +43,7 @@ from celery.signals import task_received
 from worker import constants
 from worker import instance
 from worker.celery import app
-from worker.config import read_build_os
+from worker.constants import CLONE_BUILD_OS
 from worker.constants import UPLOADED_BUILD_OS
 from worker.docker import get_client
 from worker.docker import start_container
@@ -58,7 +55,6 @@ from worker.exceptions import BuildUserError
 from worker.exceptions import PreContainerFailure
 from worker.exceptions import RepositoryError
 from worker.git import lsremote
-from worker.git import sparse_clone_yaml
 
 
 log = structlog.get_logger(__name__)
@@ -232,11 +228,13 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
 
     1. Set up an API client using ``build_api_key``.
     2. Fetch Build → Version → Project via the API.
-    3. Sparse-clone ``.readthedocs.yaml``.
-    4. Parse ``build.os`` and pick the ``readthedocs/build:<os>`` image.
-    5. Resolve ``memory`` + ``time_limit_seconds`` from project
+    3. Resolve ``memory`` + ``time_limit_seconds`` from project
        fields, falling back to ``worker.constants``.
-    6. Start the build container, run the build in this process, stop it.
+    4. Start a container to clone the repository in. Its image is fixed,
+       because ``build.os`` isn't known until ``.readthedocs.yaml`` is read.
+    5. Run the build in this process. Once the runner has read the config it
+       replaces that container with one for ``build.os``.
+    6. Stop the container.
 
     The build runs here, in the Celery task, and reaches into the container
     with ``docker exec`` for every build command — so the container never
@@ -271,7 +269,7 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
     with _cancellation_handlers():
         try:
             build, version = _fetch_build(api_client, build_pk)
-            build_os, memory, time_limit_seconds = _prepare_build(
+            memory, time_limit_seconds = _prepare_build(
                 api_client=api_client,
                 build=build,
                 version=version,
@@ -285,7 +283,9 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
             _fail_build(api_client, build_pk, exc)
             return
 
-        structlog.contextvars.bind_contextvars(build_os=build_os)
+        # Uploaded builds have nothing to clone, so they go straight to their
+        # final container.
+        initial_os = UPLOADED_BUILD_OS if build.get("is_uploaded") else CLONE_BUILD_OS
         log.info(
             "Running build.",
             memory=memory,
@@ -296,11 +296,18 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
         # container with it, and the runner execs into it with the same one.
         docker_client = get_client()
 
+        def start_build_container(build_os):
+            """Start (replacing any previous) the build container, with its healthcheck."""
+            structlog.contextvars.bind_contextvars(build_os=build_os)
+            name = start_container(
+                docker_client, build_pk=build_pk, build_os=build_os, memory=memory
+            )
+            _start_healthcheck(docker_client, name, environment, build_pk)
+            return name
+
         try:
             try:
-                container = start_container(
-                    docker_client, build_pk=build_pk, build_os=build_os, memory=memory
-                )
+                container = start_build_container(initial_os)
             except BuildCancelled:
                 _cancel_build(api_client, build_pk)
                 return
@@ -309,8 +316,6 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                 _fail_build(api_client, build_pk, exc)
                 return
 
-            _start_healthcheck(docker_client, container, environment, build_pk)
-
             with _time_limit(time_limit_seconds):
                 run_builder(
                     api_client=api_client,
@@ -318,6 +323,7 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                     build=build,
                     version=version,
                     container_name=container,
+                    start_build_container=start_build_container,
                     production_domain=production_domain,
                     allow_private_repos=_to_bool(environment.get("RTD_ALLOW_PRIVATE_REPOS")),
                     s3_endpoint_url=environment.get("AWS_S3_ENDPOINT_URL") or None,
@@ -434,8 +440,7 @@ def _prepare_build(*, api_client, build, version):
     """
     Everything between fetching the build and starting its container.
 
-    Returns ``(build_os, memory, time_limit_seconds)``, or raises
-    ``PreContainerFailure``.
+    Returns ``(memory, time_limit_seconds)``, or raises ``PreContainerFailure``.
     """
     project = version["project"]
     project_pk = project["id"]
@@ -444,68 +449,10 @@ def _prepare_build(*, api_client, build, version):
     time_limit_seconds = project.get("container_time_limit") or constants.BUILD_TIME_LIMIT
 
     if build.get("is_uploaded"):
-        # Nothing to clone: the artifacts came in through the upload API, so
-        # there is no repository and no ``.readthedocs.yaml`` to read
-        # ``build.os`` from.
-        log.info("Build is uploaded; skipping sparse-clone.")
-        return UPLOADED_BUILD_OS, memory, time_limit_seconds
-
-    # Sparse-clone `.readthedocs.yaml`.
-    repo_url = project.get("repo") or ""
-    ssh_key = ""
-    if repo_url.startswith("git@") or repo_url.startswith("ssh://"):
-        ssh_key = get_project_ssh_key(api_client, project_pk)
-
-    # Fetch the same ref the runner will build. For branches the identifier is
-    # the branch name (``git clone -b`` would work), but for tags and external
-    # (PR/MR) versions it's a commit hash / pull refspec, so we resolve it here.
-    # Falls back to the remote's default branch (``HEAD``) when undecidable.
-    refspec = (
-        get_remote_fetch_refspec(
-            version_type=version.get("type", "branch"),
-            verbose_name=version.get("verbose_name", ""),
-            identifier=version.get("identifier", ""),
-            machine=version.get("machine", False),
-            slug=version.get("slug", ""),
-            is_github="github.com" in repo_url,
-            is_gitlab="gitlab.com" in repo_url,
-        )
-        or "HEAD"
-    )
-
-    git_env = {
-        **os.environ,
-        "READTHEDOCS_GIT_CLONE_TOKEN": project.get("clone_token") or "",
-    }
-
-    tmp = tempfile.mkdtemp(prefix="rtd-bootstrap-")
-    try:
-        config_path = sparse_clone_yaml(
-            repo_url=repo_url,
-            refspec=refspec,
-            ssh_key=ssh_key,
-            dest=tmp,
-            env=git_env,
-            yaml_path=project.get("readthedocs_yaml_path"),
-        )
-        if config_path is None:
-            raise PreContainerFailure(BuildUserError.NO_CONFIG_FILE_DEPRECATED)
-        # Parse build.os and resolve alias.
-        build_os = read_build_os(config_path)
-    except subprocess.CalledProcessError as exc:
-        # git clone / sparse-checkout failed — surface as an app error
-        # (could be network, auth, etc).
-        log.error(
-            "git sparse-clone failed.",
-            returncode=exc.returncode,
-            stderr=(exc.stderr or b"").decode(errors="replace")[:2000],
-        )
-        raise PreContainerFailure(BuildAppError.GENERIC_WITH_BUILD_ID)
-    except subprocess.TimeoutExpired as exc:
-        log.error("git sparse-clone timed out.", timeout_seconds=exc.timeout)
-        raise PreContainerFailure(BuildAppError.GENERIC_WITH_BUILD_ID)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        # Nothing to sync: the artifacts came in through the upload API, so
+        # there is no repository.
+        log.info("Build is uploaded; skipping version sync.")
+        return memory, time_limit_seconds
 
     # Sync tags/branches into the DB (and fail early on a duplicate reserved
     # version). Runs here — before the container — so it can fail the build the
@@ -514,9 +461,18 @@ def _prepare_build(*, api_client, build, version):
     # since they are not trusted and could fake the output of the commands
     # to create/delete versions in our database.
     if version.get("type") != EXTERNAL:
+        repo_url = project.get("repo") or ""
+        ssh_key = ""
+        if repo_url.startswith("git@") or repo_url.startswith("ssh://"):
+            ssh_key = get_project_ssh_key(api_client, project_pk)
+
+        git_env = {
+            **os.environ,
+            "READTHEDOCS_GIT_CLONE_TOKEN": project.get("clone_token") or "",
+        }
         _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
-    return build_os, memory, time_limit_seconds
+    return memory, time_limit_seconds
 
 
 # ``git ls-remote`` is one network round trip; the app-level default

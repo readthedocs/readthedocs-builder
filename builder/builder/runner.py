@@ -90,6 +90,7 @@ class Runner:
                 self._post_checkout()
 
                 self._set_build_state(BUILD_STATE_INSTALLING)
+                self.director.switch_to_build_container()
                 self.director.create_build_environment()
 
                 # ``build.commands`` (generic builds) bypass the language
