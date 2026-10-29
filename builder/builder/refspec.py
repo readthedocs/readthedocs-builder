@@ -1,8 +1,7 @@
 """
 Remote ``git fetch`` refspec for a version.
 
-Shared by the runner (``builder/``) and the worker's bootstrap sparse-clone
-(``worker/``) so both fetch the *same* ref. This matters most for tags and
+Used by the runner's clone. This matters most for tags and
 external (PR/MR) versions, whose ``identifier`` is a commit hash rather than a
 name — ``git clone -b <hash>`` fails, so the ref has to be fetched explicitly.
 

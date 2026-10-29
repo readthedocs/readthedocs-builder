@@ -15,10 +15,6 @@ dependencies = [
     # HTTP layer under slumber and docker.
     "requests>=2.31",
 
-    # .readthedocs.yaml parsing (worker/tasks.py sparse-clones the yaml to
-    # determine build.os before starting the container).
-    "pyyaml>=6.0",
-
     # Build container lifecycle (worker/docker.py). The runner uses the same
     # client for ``docker exec``, so it is a direct dependency of both.
     "docker>=7.1",

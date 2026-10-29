@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 import structlog
 
@@ -31,6 +32,8 @@ from builder.constants import EXTERNAL
 from builder.constants import GENERIC
 from builder.constants import MESSAGE_PROJECT_SSH_KEY_WITH_WRITE_ACCESS
 from builder.environments import DockerBuildEnvironment
+from builder.exceptions import BuildAppError
+from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
 from builder.exceptions import RepositoryError
 from builder.filesystem import safe_open
@@ -70,6 +73,9 @@ class TaskData:
     # substitute the local ``BuildEnvironment``.
     environment_class: type = DockerBuildEnvironment
     container_name: str | None = None
+    # Replaces the clone container with one for ``build.os`` and returns its
+    # name. The worker owns the container lifecycle, so it hands us this.
+    start_build_container: Callable[[str], str] | None = None
     # The worker's Docker client, shared so a build opens one connection.
     docker_client: Any = None
     build_director: "BuildDirector | None" = None
@@ -160,6 +166,29 @@ class BuildDirector:
             docker_client=self.data.docker_client,
             allow_private_repos=self.data.allow_private_repos,
         )
+
+    def switch_to_build_container(self):
+        """
+        Replace the clone container with one running the config's ``build.os``.
+
+        The repository is cloned in a fixed image because ``build.os`` is only
+        known after reading ``.readthedocs.yaml`` from the clone.
+        """
+        if not self.data.start_build_container:
+            return
+
+        try:
+            self.data.container_name = self.data.start_build_container(
+                self.data.config.build.os
+            )
+        except BuildCancelled:
+            raise
+        except Exception as exc:
+            raise BuildAppError(BuildAppError.GENERIC_WITH_BUILD_ID) from exc
+
+        # The ssh-agent lived in the clone container, which is gone now. Build
+        # commands don't get the deploy key (same as the legacy builders).
+        self.ssh_agent_env = {}
 
     def create_build_environment(self):
         """Build the post-config :class:`BuildEnvironment` for build commands."""
@@ -691,8 +720,8 @@ class BuildDirector:
         Fetch the private key from the API, start an ssh-agent and ``ssh-add``
         through the VCS environment (so the agent lives in the build
         container, where every git command runs), and inject
-        ``SSH_AUTH_SOCK``/``SSH_AGENT_PID`` so both VCS and build commands can
-        authenticate for the whole build. The key never touches disk: it is
+        ``SSH_AUTH_SOCK``/``SSH_AGENT_PID`` so the VCS commands can authenticate.
+        The agent dies with the clone container, so build commands never see it. The key never touches disk: it is
         piped to ``ssh-add`` from an environment variable.
 
         No-op for public/HTTPS repos, or when private repos aren't allowed.

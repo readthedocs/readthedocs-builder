@@ -171,6 +171,44 @@ def test_ssh_agent_env_flows_into_build_env_vars(docroot):
     assert env["SSH_AUTH_SOCK"] == "/tmp/ssh-xyz/agent.42"
 
 
+def test_switch_to_build_container_starts_the_container_for_the_config_os(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = mock.Mock(return_value="build-42")
+
+    director.switch_to_build_container()
+
+    director.data.start_build_container.assert_called_once_with(director.data.config.build.os)
+    assert director.data.container_name == "build-42"
+
+
+def test_switch_to_build_container_drops_the_ssh_agent(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = mock.Mock(return_value="build-42")
+    director.ssh_agent_env = {"SSH_AUTH_SOCK": "/tmp/ssh-xyz/agent.42"}
+
+    director.switch_to_build_container()
+
+    assert "SSH_AUTH_SOCK" not in director.get_build_env_vars()
+
+
+def test_switch_to_build_container_noop_without_a_starter(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = None
+    director.data.container_name = "build-42"
+
+    director.switch_to_build_container()
+
+    assert director.data.container_name == "build-42"
+
+
+def test_switch_to_build_container_reports_a_start_failure_as_an_app_error(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = mock.Mock(side_effect=RuntimeError("docker down"))
+
+    with pytest.raises(BuildAppError):
+        director.switch_to_build_container()
+
+
 def test_build_env_vars_non_conda_sets_virtualenv_path(docroot):
     director = make_director(SPHINX)
     env = director.get_build_env_vars()
