@@ -100,9 +100,9 @@ def get_project(api_client, project_pk: int) -> dict:
     """
     Fetch raw project JSON from the API.
 
-    Includes ``clone_token`` — used for HTTPS auth by the
-    clone and the host-side ``ls-remote``. For SSH projects, ``clone_token`` will be empty and the
-    worker falls back to the SSH-key endpoint.
+    Includes ``clone_token`` — used for HTTPS auth by the clone and the
+    host-side ``ls-remote``. For SSH projects, ``clone_token`` will be empty
+    and the worker falls back to the SSH-key endpoint.
     """
     return api_client.project(project_pk).get()
 

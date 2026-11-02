@@ -43,8 +43,6 @@ from celery.signals import task_received
 from worker import constants
 from worker import instance
 from worker.celery import app
-from worker.constants import CLONE_BUILD_OS
-from worker.constants import UPLOADED_BUILD_OS
 from worker.docker import get_client
 from worker.docker import start_container
 from worker.docker import start_healthcheck
@@ -283,9 +281,6 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
             _fail_build(api_client, build_pk, exc)
             return
 
-        # Uploaded builds have nothing to clone, so they go straight to their
-        # final container.
-        initial_os = UPLOADED_BUILD_OS if build.get("is_uploaded") else CLONE_BUILD_OS
         log.info(
             "Running build.",
             memory=memory,
@@ -307,7 +302,7 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
 
         try:
             try:
-                container = start_build_container(initial_os)
+                container = start_build_container(constants.INITIAL_BUILD_OS)
             except BuildCancelled:
                 _cancel_build(api_client, build_pk)
                 return
