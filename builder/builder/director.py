@@ -184,9 +184,10 @@ class BuildDirector:
         except Exception as exc:
             raise BuildAppError(BuildAppError.GENERIC_WITH_BUILD_ID) from exc
 
-        # The ssh-agent lived in the clone container, which is gone now. Build
-        # commands don't get the deploy key (same as the legacy builders).
-        self.ssh_agent_env = {}
+        # The ssh-agent died with the clone container. Start a new one so build
+        # commands keep the deploy key; the new container reuses the name, so
+        # ``vcs_environment`` now execs into it.
+        self.setup_ssh_agent()
 
     def create_build_environment(self):
         """Build the post-config :class:`BuildEnvironment` for build commands."""
@@ -718,10 +719,9 @@ class BuildDirector:
         Fetch the private key from the API, start an ssh-agent and ``ssh-add``
         through the VCS environment (so the agent lives in the build
         container, where every git command runs), and inject
-        ``SSH_AUTH_SOCK``/``SSH_AGENT_PID`` so the VCS commands can authenticate.
-        The agent dies with the clone container, so build commands never see
-        it. The key never touches disk: it is piped to ``ssh-add`` from an
-        environment variable.
+        ``SSH_AUTH_SOCK``/``SSH_AGENT_PID`` so both VCS and build commands can
+        authenticate. The key never touches disk: it is piped to ``ssh-add``
+        from an environment variable.
 
         No-op for public/HTTPS repos, or when private repos aren't allowed.
         """

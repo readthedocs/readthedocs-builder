@@ -181,14 +181,13 @@ def test_switch_to_build_container_starts_the_container_for_the_config_os(docroo
     assert director.data.container_name == "build-42"
 
 
-def test_switch_to_build_container_drops_the_ssh_agent(docroot):
-    director = make_director(SPHINX)
+def test_switch_to_build_container_restarts_the_ssh_agent(docroot):
+    director = _private_repo_director()
     director.data.start_build_container = mock.Mock(return_value="build-42")
-    director.ssh_agent_env = {"SSH_AUTH_SOCK": "/tmp/ssh-xyz/agent.42"}
 
     director.switch_to_build_container()
 
-    assert "SSH_AUTH_SOCK" not in director.get_build_env_vars()
+    assert director.get_build_env_vars()["SSH_AUTH_SOCK"] == "/tmp/ssh-xyz/agent.42"
 
 
 def test_switch_to_build_container_noop_without_a_starter(docroot):
