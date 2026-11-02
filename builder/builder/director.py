@@ -719,8 +719,9 @@ class BuildDirector:
         through the VCS environment (so the agent lives in the build
         container, where every git command runs), and inject
         ``SSH_AUTH_SOCK``/``SSH_AGENT_PID`` so the VCS commands can authenticate.
-        The agent dies with the clone container, so build commands never see it. The key never touches disk: it is
-        piped to ``ssh-add`` from an environment variable.
+        The agent dies with the clone container, so build commands never see
+        it. The key never touches disk: it is piped to ``ssh-add`` from an
+        environment variable.
 
         No-op for public/HTTPS repos, or when private repos aren't allowed.
         """
