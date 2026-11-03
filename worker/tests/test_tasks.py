@@ -250,6 +250,21 @@ def test_prepare_build_fails_when_the_config_file_is_missing(monkeypatch, api_cl
     assert excinfo.value.message_id == BuildUserError.NO_CONFIG_FILE_DEPRECATED
 
 
+def test_prepare_build_syncs_versions_when_the_config_file_is_missing(
+    monkeypatch, api_client, mock_api, sync_versions_calls
+):
+    # Docs may live on a branch other than the default one, so the
+    # branches must be synced even when the first build can't find a config.
+    mock_api()
+    monkeypatch.setattr(tasks, "sparse_clone_yaml", lambda **kwargs: None)
+    build, version = tasks._fetch_build(api_client, 42)
+
+    with pytest.raises(PreContainerFailure):
+        tasks._prepare_build(api_client=api_client, build=build, version=version)
+
+    assert len(sync_versions_calls) == 1
+
+
 def test_fetch_build_fails_when_the_build_has_no_version(api_client, requests_mock):
     requests_mock.get(f"{API_URL}/api/v2/build/42/", json={"id": 42}, headers=JSON)
 
