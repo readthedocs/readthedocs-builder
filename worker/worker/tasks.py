@@ -478,6 +478,16 @@ def _prepare_build(*, api_client, build, version):
         "READTHEDOCS_GIT_CLONE_TOKEN": project.get("clone_token") or "",
     }
 
+    # Sync tags/branches into the DB (and fail early on a duplicate reserved
+    # version). Runs here — before the container — so it can fail the build the
+    # way upstream does. Runs before reading the config file, so branches are
+    # synced even when the config file is missing from the version being built.
+    # SECURITY: never sync versions from external versions (PRs),
+    # since they are not trusted and could fake the output of the commands
+    # to create/delete versions in our database.
+    if version.get("type") != EXTERNAL:
+        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
+
     tmp = tempfile.mkdtemp(prefix="rtd-bootstrap-")
     try:
         config_path = sparse_clone_yaml(
@@ -506,15 +516,6 @@ def _prepare_build(*, api_client, build, version):
         raise PreContainerFailure(BuildAppError.GENERIC_WITH_BUILD_ID)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
-    # Sync tags/branches into the DB (and fail early on a duplicate reserved
-    # version). Runs here — before the container — so it can fail the build the
-    # way upstream does.
-    # SECURITY: never sync versions from external versions (PRs),
-    # since they are not trusted and could fake the output of the commands
-    # to create/delete versions in our database.
-    if version.get("type") != EXTERNAL:
-        _sync_versions(project=project, repo_url=repo_url, ssh_key=ssh_key, git_env=git_env)
 
     return build_os, memory, time_limit_seconds
 
