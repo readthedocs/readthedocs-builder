@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import structlog
+from docker.errors import NotFound as DockerNotFound
 from slumber.exceptions import HttpClientError
 
 from builder import binaries
@@ -111,6 +112,17 @@ class Runner:
             # (their doctool "succeeds" but produces no ``_readthedocs`` output).
             # Upstream runs this after the build in ``execute()``.
             self.director.check_old_output_directory()
+
+            # Nothing below runs in the container: validation and upload read
+            # the output tree from the host. End the container here, as
+            # upstream does when its Docker environment context exits before
+            # ``on_success``, so the tree is settled while it's being read.
+            # The worker still removes the container afterwards.
+            if self.data.docker_client is not None and self.data.container_name:
+                try:
+                    self.data.docker_client.kill(self.data.container_name)
+                except DockerNotFound:
+                    pass
 
             self._set_build_state(BUILD_STATE_UPLOADING)
             valid_artifacts = self._validate_artifacts()
