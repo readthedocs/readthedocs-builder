@@ -1,8 +1,10 @@
 """
 Running one build.
 
-``worker.tasks.run_build`` calls this in-process, having already started the
-build container that every command will ``docker exec`` into.
+``worker.tasks.run_build`` calls this in-process, having already started a
+container to clone the repository in. Once the config is read, that container
+is replaced by one for the project's ``build.os``, and every build command
+``docker exec``s into the latter.
 
 The worker hands us everything it already knows — an authenticated API client,
 the Build and Version it fetched, the container it started — so nothing here
@@ -33,6 +35,7 @@ def run_build(
     production_domain: str,
     allow_private_repos: bool = False,
     s3_endpoint_url: str | None = None,
+    start_build_container=None,
 ) -> bool:
     """
     Run ``build``. Returns its success boolean.
@@ -46,6 +49,9 @@ def run_build(
     :param version: the Version payload, with its Project nested inside.
     :param container_name: the running build container to ``docker exec``
         into. The worker owns its lifecycle.
+    :param start_build_container: Called once the config is read,
+        to replace the clone container (``container_name``)
+        with one running the project's ``build.os``.
     :param production_domain: dashboard domain, used for the build URL and the
         ``READTHEDOCS_PRODUCTION_DOMAIN`` variable user commands see.
     :param allow_private_repos: whether this Read the Docs supports private
@@ -79,6 +85,7 @@ def run_build(
         version=version,
         build=build,
         container_name=container_name,
+        start_build_container=start_build_container,
         docker_client=docker_client,
         production_domain=production_domain,
         allow_private_repos=allow_private_repos,

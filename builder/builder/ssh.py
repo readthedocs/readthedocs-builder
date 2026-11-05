@@ -1,7 +1,7 @@
 """
 Shared SSH helpers for cloning private repositories over SSH.
 
-Used by both the worker (host-side sparse clone / ls-remote in
+Used by both the worker (host-side ls-remote in
 ``worker/git.py``) and the runner (in-container clone in
 ``builder/director.py``). Keeping the ``GIT_SSH_COMMAND`` string and the
 ``ssh-agent -s`` output parsing here stops the two from diverging.
