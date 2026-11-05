@@ -9,6 +9,7 @@ Everything else in ``run()`` (API claims, artifact upload, signal handlers) is
 stubbed at the runner's own seams.
 """
 
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -506,6 +507,67 @@ def test_upload_artifacts_survives_delete_failures(docroot):
         runner._upload_artifacts(["html"])
 
     storage.rclone_sync_directory.assert_called_once()
+
+
+def test_upload_artifacts_uploads_the_manifest_after_the_html_sync(docroot):
+    # A build with HTML also ships the file tree diff manifest, parsed while
+    # the HTML syncs and uploaded as a single file under ``diff/`` once the
+    # sync is done.
+    runner = Runner(make_director().data)
+    _valid_html(runner)
+    patcher, storage = _patch_storage()
+
+    with patcher:
+        runner._upload_artifacts(["html"])
+
+    calls = [call[0] for call in storage.mock_calls]
+    assert calls.index("rclone_sync_directory") < calls.index("upload_file")
+    storage.upload_file.assert_called_once()
+    manifest_source, destination = storage.upload_file.call_args.args
+    assert destination == "diff/pip/latest/manifest.json"
+    manifest = json.loads(Path(manifest_source).read_text())
+    assert manifest["build"] == {"id": runner.data.build["id"]}
+    assert list(manifest["files"]) == ["index.html"]
+
+
+def test_upload_artifacts_skips_the_manifest_without_html(docroot):
+    runner = Runner(make_director().data)
+    patcher, storage = _patch_storage()
+
+    with patcher:
+        runner._upload_artifacts(["pdf"])
+
+    storage.upload_file.assert_not_called()
+
+
+def test_upload_manifest_errors_do_not_fail_the_build(docroot):
+    # Without this build's manifest in storage the server regenerates it in
+    # ``index_build``, so a manifest failure must never fail an
+    # otherwise-good build.
+    runner = Runner(make_director().data)
+    _valid_html(runner)
+    patcher, storage = _patch_storage()
+    storage.upload_file.side_effect = OSError("boom")
+
+    with patcher:
+        runner._upload_artifacts(["html"])
+
+    storage.rclone_sync_directory.assert_called_once()
+
+
+def test_manifest_parse_errors_do_not_fail_the_build(docroot):
+    runner = Runner(make_director().data)
+    _valid_html(runner)
+    patcher, storage = _patch_storage()
+
+    with (
+        patcher,
+        mock.patch("builder.parse.generate_manifest", side_effect=RuntimeError("boom")),
+    ):
+        runner._upload_artifacts(["html"])
+
+    storage.rclone_sync_directory.assert_called_once()
+    storage.upload_file.assert_not_called()
 
 
 def test_validate_artifacts_leaves_an_already_named_file_alone(docroot):
