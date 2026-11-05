@@ -374,6 +374,23 @@ def test_build_resolves_python_315_aliases(version):
     assert build.build.tools["python"].full_version == "3.15.2"
 
 
+@pytest.mark.parametrize(
+    "tool, version, full_version",
+    [
+        ("rust", "latest", "1.99.1"),
+        ("golang", "latest", "1.27.3"),
+        ("nodejs", "latest", "26.13.0"),
+        ("ruby", "latest", "4.0.9"),
+    ],
+)
+def test_build_resolves_latest_tool_aliases(tool, version, full_version):
+    build = get_build_config(
+        {"build": {"os": "ubuntu-22.04", "tools": {tool: version}}},
+        validate=True,
+    )
+    assert build.build.tools[tool].full_version == full_version
+
+
 def test_build_rejects_a_non_dict():
     build = get_build_config({"build": "ubuntu-22.04"})
     with raises(ConfigError) as excinfo:
