@@ -104,14 +104,14 @@ def _agent_output():
 
 def test_setup_ssh_agent_noop_when_private_repos_disabled(docroot):
     director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"})
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
     assert director.ssh_agent_env == {}
     director.vcs_environment.run.assert_not_called()
 
 
 def test_setup_ssh_agent_noop_for_https_repo(docroot, monkeypatch):
     director = make_director(SPHINX, project={"repo": "https://github.com/rtd/public"}, allow_private_repos=True)
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
     assert director.ssh_agent_env == {}
     director.vcs_environment.run.assert_not_called()
 
@@ -119,7 +119,7 @@ def test_setup_ssh_agent_noop_for_https_repo(docroot, monkeypatch):
 def test_setup_ssh_agent_skips_when_project_has_no_key(docroot, monkeypatch):
     director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
     director.data.api_client.project.return_value.key.get.return_value = {"private_key": ""}
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
     assert director.ssh_agent_env == {}
     director.vcs_environment.run.assert_not_called()
 
@@ -128,7 +128,7 @@ def test_setup_ssh_agent_loads_key_and_injects_env(docroot, monkeypatch):
     monkeypatch.setenv("RTD_BUILD_TIME_LIMIT_SECONDS", "900")
     director = _private_repo_director()
 
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
 
     assert director.ssh_agent_env == {
         "SSH_AUTH_SOCK": "/tmp/ssh-xyz/agent.42",
@@ -154,7 +154,7 @@ def test_setup_ssh_agent_pipes_the_key_from_an_env_var(docroot):
     """
     director = _private_repo_director()
 
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
 
     call = _ssh_add_call(director)
     ttl = director._ssh_key_ttl()
@@ -181,7 +181,7 @@ def test_switch_to_build_container_starts_the_container_for_the_config_os(docroo
     assert director.data.container_name == "build-42"
 
 
-def test_switch_to_build_container_drops_the_ssh_agent(docroot):
+def test_switch_to_build_container_drops_the_stale_ssh_agent(docroot):
     director = make_director(SPHINX)
     director.data.start_build_container = mock.Mock(return_value="build-42")
     director.ssh_agent_env = {"SSH_AUTH_SOCK": "/tmp/ssh-xyz/agent.42"}
@@ -189,6 +189,19 @@ def test_switch_to_build_container_drops_the_ssh_agent(docroot):
     director.switch_to_build_container()
 
     assert "SSH_AUTH_SOCK" not in director.get_build_env_vars()
+
+
+def test_create_build_environment_starts_an_ssh_agent_in_the_build_container(docroot):
+    director = _private_repo_director()
+    director.data.build = {}
+    build_env = mock.Mock()
+    build_env.run.return_value.output = _agent_output()
+    director.data.environment_class = mock.Mock(return_value=build_env)
+
+    director.create_build_environment()
+
+    assert director.ssh_agent_env["SSH_AUTH_SOCK"] == "/tmp/ssh-xyz/agent.42"
+    build_env._environment.update.assert_called_with(director.ssh_agent_env)
 
 
 def test_switch_to_build_container_noop_without_a_starter(docroot):
