@@ -142,7 +142,13 @@ class Runner:
             # the user stopped it (or a command exited 183), it didn't fail.
             if isinstance(exc, BuildCancelled):
                 self._state = BUILD_STATE_CANCELLED
-            self._attach_failure_notification(exc)
+            if isinstance(exc, BuildCancelled) and self._finished_by_web():
+                # The web already finished this build (e.g. terminated for
+                # inactivity) and attached its own notification. The revoke
+                # that brought us here isn't a user cancellation.
+                log.info("Build already finished by the web; skipping notification.")
+            else:
+                self._attach_failure_notification(exc)
             # ``BuildAppError`` represents *our* bugs (AWS failures, dispatch
             # errors, etc.). Re-raise so the traceback ends up in New Relic /
             # ``docker logs`` for debugging. ``BuildCancelled`` and
@@ -262,6 +268,15 @@ class Runner:
         self.data.api_client.build(self.data.build["id"]).patch(
             {"builder": settings.RTD_BUILDER_HOSTNAME}
         )
+
+    def _finished_by_web(self):
+        """Whether the API already shows this build in a final state."""
+        try:
+            build = self.data.api_client.build(self.data.build["id"]).get()
+        except Exception:
+            log.exception("Failed to fetch the build state.")
+            return False
+        return build.get("state") in BUILD_FINAL_STATES
 
     def _set_build_state(self, state):
         """PATCH the build's state."""

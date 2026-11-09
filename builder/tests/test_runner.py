@@ -100,6 +100,42 @@ def test_on_cancel_deferred_during_upload(docroot):
     assert runner._on_cancel(15, None) is None
 
 
+def _cancelled_runner(api_state):
+    runner = _make_runner(
+        {
+            "build": {"os": "ubuntu-22.04", "tools": {"python": "3"}},
+            "sphinx": {"configuration": "conf.py"},
+        }
+    )
+    runner.director.build.side_effect = BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
+    runner.data.api_client.build.return_value.get.return_value = {"state": api_state}
+    return runner
+
+
+def test_user_cancel_attaches_cancelled_notification(docroot):
+    runner = _cancelled_runner("building")
+
+    runner.run()
+
+    runner.director.attach_notification.assert_called_once()
+    assert (
+        runner.director.attach_notification.call_args.kwargs["message_id"]
+        == BuildCancelled.CANCELLED_BY_USER
+    )
+    runner._finalize.assert_called_once()
+
+
+def test_cancel_of_build_finished_by_web_skips_notification(docroot):
+    # The web's inactivity check cancels the build and attaches its own
+    # notification before revoking the task; don't add "cancelled manually".
+    runner = _cancelled_runner("cancelled")
+
+    runner.run()
+
+    runner.director.attach_notification.assert_not_called()
+    runner._finalize.assert_called_once()
+
+
 def test_run_dispatches_generic_builds_to_build_commands(docroot):
     runner = _make_runner(
         {
