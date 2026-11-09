@@ -367,7 +367,15 @@ def _sync_versions(*, project, repo_url, ssh_key, git_env):
             include_branches=include_branches,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        log.warning("git ls-remote failed; skipping version sync.", error=str(exc))
+        # SECURITY: never log ``str(exc)`` here. Both exceptions render the
+        # full command line, and for HTTPS repos that is the URL with the
+        # clone token in its userinfo. git's stderr quotes the URL too.
+        log.warning(
+            "git ls-remote failed; skipping version sync.",
+            returncode=getattr(exc, "returncode", None),
+            timeout_seconds=getattr(exc, "timeout", None),
+            stderr=_redact_clone_token(exc.stderr, git_env),
+        )
         return
 
     branches, tags = parse_lsremote(stdout)
@@ -389,6 +397,27 @@ def _sync_versions(*, project, repo_url, ssh_key, git_env):
         },
         queue=constants.SYNC_VERSIONS_TASK_QUEUE,
     )
+
+
+def _redact_clone_token(stderr, git_env, limit=2000):
+    """
+    Return ``stderr`` as text with the clone token masked, for logging.
+
+    The token lives in ``git_env["READTHEDOCS_GIT_CLONE_TOKEN"]`` and has the
+    ``<username>:<secret>`` format; both the whole thing and the secret half
+    are masked (same as ``BuildCommand.obfuscate_output``).
+    """
+    if not stderr:
+        return ""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    token = (git_env or {}).get("READTHEDOCS_GIT_CLONE_TOKEN") or ""
+    if token:
+        secret = token.split(":", 1)[-1]
+        for value in (token, secret):
+            if value:
+                stderr = stderr.replace(value, "****")
+    return stderr[:limit]
 
 
 def _fetch_build(api_client, build_pk):
