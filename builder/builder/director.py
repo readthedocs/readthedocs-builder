@@ -184,9 +184,13 @@ class BuildDirector:
         except Exception as exc:
             raise BuildAppError(BuildAppError.GENERIC_WITH_BUILD_ID) from exc
 
-        # The ssh-agent died with the clone container; ``create_build_environment``
-        # starts a new one in the build container.
+        # The ssh-agent died with the clone container, so start a new one. The
+        # new container reuses the name, so ``vcs_environment`` execs into it.
+        # SECURITY: never set the agent up through ``build_environment``: it
+        # carries the project's env vars (e.g. ``LD_PRELOAD``), which would
+        # run in the same process as the private key.
         self.ssh_agent_env = {}
+        self.setup_ssh_agent(self.vcs_environment)
 
     def create_build_environment(self):
         """Build the post-config :class:`BuildEnvironment` for build commands."""
@@ -208,9 +212,6 @@ class BuildDirector:
             docker_client=self.data.docker_client,
             allow_private_repos=self.data.allow_private_repos,
         )
-
-        if not self.data.build.get("is_uploaded"):
-            self.setup_ssh_agent(self.build_environment)
 
     def setup_environment(self):
         """
