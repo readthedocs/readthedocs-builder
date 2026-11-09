@@ -154,8 +154,7 @@ class Backend:
         """
         Build the refspec for ``git fetch`` based on the version type.
 
-        Delegates to ``builder.refspec`` so the build and the worker's
-        bootstrap sparse-clone stay in agreement.
+        Delegates to ``builder.refspec``.
         """
         return get_remote_fetch_refspec(
             version_type=self.version.type,

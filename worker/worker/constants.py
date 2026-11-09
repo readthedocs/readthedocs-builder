@@ -12,18 +12,11 @@ UPLOADED_BUILD_OS = "ubuntu-26.04"
 # Seconds between healthcheck pings from the runner.
 BUILD_HEALTHCHECK_DELAY = 15
 
-# The sparse clone fetches one file with ``--filter=blob:none``; seconds in
-# practice. Bounded so a hung clone can't wedge the task forever.
+# Bounds the host-side ``git ls-remote`` so a hung remote can't wedge the task.
 GIT_CLONE_TIMEOUT_SECONDS = 300
 
-# Literal names for ``git sparse-checkout``. Only used when the project has no
-# ``readthedocs_yaml_path`` set.
-CONFIG_FILENAMES = (
-    ".readthedocs.yaml",
-    ".readthedocs.yml",
-    "readthedocs.yaml",
-    "readthedocs.yml",
-)
+# ``build.os`` of the container the repository is cloned in.
+CLONE_BUILD_OS = "ubuntu-lts-latest"
 
 # readthedocs.org Celery task that reconciles ``Version`` rows from the
 # tags/branches the worker ls-remotes.

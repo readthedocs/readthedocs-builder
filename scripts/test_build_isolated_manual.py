@@ -10,8 +10,9 @@ configured for.
 
 The worker on a fresh build-isolated EC2 instance (booted from the
 new Packer AMI) picks it up, fetches build/project data from the API
-using ``build_api_key``, sparse-clones ``.readthedocs.yaml`` to figure
-out ``build.os``, and then ``docker run``s the build container.
+using ``build_api_key``, starts a container to clone the repository, reads
+``build.os`` from ``.readthedocs.yaml`` and then runs the build in a container
+for that OS.
 
 Run with:
     cat test_build_isolated_manual.py | uv run django-admin shell 
