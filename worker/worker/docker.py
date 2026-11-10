@@ -14,6 +14,7 @@ import structlog
 from docker.errors import NotFound
 
 from builder import binaries
+from worker.config import resolve_build_os
 
 
 log = structlog.get_logger(__name__)
@@ -113,7 +114,7 @@ def start_container(client, *, build_pk, build_os, memory):
     Raises ``docker.errors.APIError`` if the container won't start; the caller
     turns that into a pre-container build failure.
     """
-    image = BUILD_IMAGE_FORMAT.format(build_os=build_os)
+    image = BUILD_IMAGE_FORMAT.format(build_os=resolve_build_os(build_os))
     name = container_name(build_pk)
 
     stop_container(client, build_pk)
