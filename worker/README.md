@@ -19,14 +19,15 @@ the container builds.
    worker asks the API to enable scale-in protection so the ASG won't kill the
    instance mid-build.
 
-2. **Prepare.** Using the API key, fetch Build → Version → Project, sparse-clone
-   `.readthedocs.yaml` to read `build.os`, sync the repo's tags/branches into the
-   database, and resolve the docker image, memory, and time limit.
+2. **Prepare.** Using the API key, fetch Build → Version → Project, sync
+   the repo's tags/branches into the database, and resolve the memory and time
+   limit.
 
-3. **Run.** `docker run` the `readthedocs/build:<os>` container and wait for it
-   to finish. The container is what actually clones the repo and builds the docs.
-   If anything fails *before* the container starts, the worker marks the build
-   failed itself.
+3. **Run.** Start a `readthedocs/build:ubuntu-lts-latest` container and clone the
+   repo in it. Once `.readthedocs.yaml` is read, replace it with a
+   `readthedocs/build:<build.os>` container, which builds the docs. The checkout is
+   shared between both through the docroot volume. If anything fails *before* the
+   first container starts, the worker marks the build failed itself.
 
 4. **Release.** When the task finishes — success or failure — ask the API to
    release scale-in protection and terminate the EC2 instance; web holds the AWS
