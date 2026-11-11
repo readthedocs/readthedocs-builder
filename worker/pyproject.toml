@@ -46,7 +46,7 @@ packages = ["worker"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.2.0",
     "pytest-cov>=5.0",
     # Mock the API at the HTTP layer rather than stubbing the client, matching
     # readthedocs.org's test suite.
