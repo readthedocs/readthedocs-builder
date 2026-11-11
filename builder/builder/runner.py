@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import structlog
+from docker.errors import DockerException
 from slumber.exceptions import HttpClientError
 
 from builder import binaries
@@ -46,6 +47,10 @@ from builder.filesystem import assert_path_is_inside_docroot
 
 log = structlog.get_logger(__name__)
 
+# Seconds the build gets to fail on its own after its time limit, once the
+# build container is killed, before the timeout is raised wherever it is.
+TIMEOUT_GRACE_SECONDS = 10
+
 
 class Runner:
     """
@@ -66,6 +71,7 @@ class Runner:
         # While True, a cancellation signal is deferred so an in-flight
         # ``rclone`` artifact sync isn't interrupted mid-upload.
         self._in_upload = False
+        self._timed_out = False
 
     def run(self):
         """Drive the full build. Returns the success boolean."""
@@ -126,6 +132,11 @@ class Runner:
 
             self._success = True
         except (BuildAppError, BuildCancelled, BuildUserError) as exc:
+            if self._timed_out and not isinstance(exc, BuildCancelled):
+                # Whatever failed after the container was killed (usually the
+                # command that was running), the build failed on its time limit.
+                signal.alarm(0)
+                exc = BuildUserError(BuildUserError.BUILD_TIME_OUT)
             # Surface the structured details — message_id and format_values —
             # so production logs (and dev's ``docker logs build-<pk>``) carry
             # the actionable info. The default Python traceback only shows
@@ -152,6 +163,8 @@ class Runner:
             if isinstance(exc, BuildAppError):
                 raise
         finally:
+            if self._timed_out:
+                signal.alarm(0)
             # Always finalize, even on failure: the build needs to leave
             # ``cloning`` / ``installing`` etc. so the API doesn't show it
             # stuck in flight.
@@ -175,13 +188,29 @@ class Runner:
         ``worker.celery``) are the backstop for that. Timing is **entirely**
         owned by the worker; this handler just receives the signal.
         """
+        if hasattr(signal, "SIGALRM"):
+            signal.signal(signal.SIGALRM, self._on_timeout)
 
-        def _on_timeout(signum, frame):
-            log.warning("SIGALRM received — build time limit reached.")
+    def _on_timeout(self, signum, frame):
+        """
+        Kill the build container, and raise if the build doesn't fail by itself.
+
+        Raising here would interrupt a running command in the middle of
+        ``docker exec`` and lose everything it printed. Killing the container
+        makes the command return instead, so its output is saved, and the
+        build fails through the usual path. If nothing was running in the
+        container, the next alarm raises the timeout.
+        """
+        if self._timed_out:
             raise BuildUserError(BuildUserError.BUILD_TIME_OUT)
 
-        if hasattr(signal, "SIGALRM"):
-            signal.signal(signal.SIGALRM, _on_timeout)
+        log.warning("SIGALRM received — build time limit reached.")
+        self._timed_out = True
+        try:
+            self.data.docker_client.kill(self.data.container_name)
+        except DockerException:
+            log.exception("Couldn't kill the build container.")
+        signal.alarm(TIMEOUT_GRACE_SECONDS)
 
     # ---- User cancellation ----
 

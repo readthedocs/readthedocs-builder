@@ -19,6 +19,7 @@ from builder.constants import MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
+from builder.runner import TIMEOUT_GRACE_SECONDS
 from builder.runner import Runner
 
 
@@ -587,3 +588,47 @@ def test_check_media_size_skips_unknown_sizes(docroot):
     runner._check_media_size(None, "html")
 
     runner.director.attach_notification.assert_not_called()
+
+
+def test_on_timeout_kills_the_container_instead_of_raising(docroot):
+    # Raising would interrupt the running ``docker exec`` and lose its output.
+    runner = Runner(make_director().data)
+    runner.data.docker_client = mock.MagicMock()
+    runner.data.container_name = "build-1"
+
+    with mock.patch("builder.runner.signal.alarm") as alarm:
+        assert runner._on_timeout(14, None) is None
+
+    runner.data.docker_client.kill.assert_called_once_with("build-1")
+    alarm.assert_called_once_with(TIMEOUT_GRACE_SECONDS)
+
+
+def test_on_timeout_raises_when_the_build_did_not_fail(docroot):
+    runner = Runner(make_director().data)
+    runner._timed_out = True
+
+    with pytest.raises(BuildUserError) as excinfo:
+        runner._on_timeout(14, None)
+
+    assert excinfo.value.message_id == BuildUserError.BUILD_TIME_OUT
+
+
+def test_run_reports_a_timeout_when_the_killed_command_fails(docroot):
+    runner = _make_runner(
+        {
+            "build": {"os": "ubuntu-22.04", "tools": {"python": "3"}},
+            "sphinx": {"configuration": "conf.py"},
+        }
+    )
+    runner._attach_failure_notification = mock.MagicMock()
+
+    def killed_by_timeout():
+        runner._timed_out = True
+        raise BuildUserError(BuildUserError.BUILD_EXCESSIVE_MEMORY)
+
+    runner.director.build.side_effect = killed_by_timeout
+
+    assert runner.run() is False
+
+    (exc,), _ = runner._attach_failure_notification.call_args
+    assert exc.message_id == BuildUserError.BUILD_TIME_OUT

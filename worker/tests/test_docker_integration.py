@@ -15,13 +15,16 @@ run with ``-m docker``.
 """
 
 import os
+import signal
 import time
 import uuid
+from unittest import mock
 
 import pytest
 
 from builder.environments import DockerBuildCommand
 from builder.environments import DockerBuildEnvironment
+from builder.runner import Runner
 from worker import docker as worker_docker
 
 
@@ -259,6 +262,27 @@ def test_healthcheck_does_not_block_other_commands(client, container, build_env)
     )
 
     assert run(build_env, "echo", "still-responsive").output.strip() == "still-responsive"
+
+
+def test_a_command_hung_at_the_time_limit_keeps_its_output(client, container, build_env):
+    """
+    The runner's time-limit handler kills the container instead of raising
+    mid-``docker exec``, so the hung command returns what it printed.
+    """
+    runner = Runner(mock.MagicMock(docker_client=client, container_name=container))
+    previous = signal.signal(signal.SIGALRM, runner._on_timeout)
+    signal.alarm(2)
+    try:
+        start = time.monotonic()
+        cmd = run(build_env, "sh", "-c", "echo Resolving dependencies; sleep 1000")
+        elapsed = time.monotonic() - start
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    assert elapsed < 10
+    assert cmd.output.startswith("Resolving dependencies\n")
+    assert "Command killed due to timeout" in cmd.output
 
 
 # ---------------------------------------------------------------------------
