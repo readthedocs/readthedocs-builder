@@ -648,7 +648,7 @@ class BuildEnvironment:
                 # In production the API recording captures it for the build
                 # web UI, but with ``record=False`` (dev runs) the output
                 # would otherwise be lost entirely.
-                log.error(
+                log.warning(
                     "Build command failed",
                     command=build_cmd.get_command(),
                     exit_code=build_cmd.exit_code,

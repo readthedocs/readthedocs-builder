@@ -126,22 +126,15 @@ class Runner:
 
             self._success = True
         except (BuildAppError, BuildCancelled, BuildUserError) as exc:
-            # Surface the structured details — message_id and format_values —
-            # so production logs (and dev's ``docker logs build-<pk>``) carry
-            # the actionable info. The default Python traceback only shows
-            # the class message ("Build user exception"), which isn't useful;
-            # the user-facing text comes from the notification system, keyed
-            # by ``message_id``.
-            log.error(
-                "Build failed.",
-                exception_type=type(exc).__name__,
-                message_id=getattr(exc, "message_id", None),
-                format_values=getattr(exc, "format_values", None) or {},
-            )
+            if isinstance(exc, BuildUserError):
+                log.warning("Build failed due to user error.")
+
             # A cancelled build finishes as ``cancelled``, not ``finished`` —
             # the user stopped it (or a command exited 183), it didn't fail.
             if isinstance(exc, BuildCancelled):
                 self._state = BUILD_STATE_CANCELLED
+                log.info("Build cancelled.")
+
             self._attach_failure_notification(exc)
             # ``BuildAppError`` represents *our* bugs (AWS failures, dispatch
             # errors, etc.). Re-raise so the traceback ends up in New Relic /
@@ -150,6 +143,18 @@ class Runner:
             # log above + the attached notification already carry everything
             # actionable, so the traceback would just be noise.
             if isinstance(exc, BuildAppError):
+                # Surface the structured details — message_id and format_values —
+                # so production logs (and dev's ``docker logs build-<pk>``) carry
+                # the actionable info. The default Python traceback only shows
+                # the class message ("Build user exception"), which isn't useful;
+                # the user-facing text comes from the notification system, keyed
+                # by ``message_id``.
+                log.error(
+                    "Build failed.",
+                    exception_type=type(exc).__name__,
+                    message_id=getattr(exc, "message_id", None),
+                    format_values=getattr(exc, "format_values", None) or {},
+                )
                 raise
         finally:
             # Always finalize, even on failure: the build needs to leave
