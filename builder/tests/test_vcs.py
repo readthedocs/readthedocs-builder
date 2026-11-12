@@ -701,6 +701,26 @@ def test_ssh_probe_converts_an_https_repo_to_ssh_form(git_repo, docroot):
     assert add_remote[-1] == "git@github.com:readthedocs/test.git"
 
 
+def test_ssh_key_write_access_push_probe(git_repo, docroot):
+    repo = make_backend(git_repo)
+    repo.update()
+
+    assert repo.has_ssh_key_with_write_access() is True
+    assert "rtd-write-access-probe" not in git(git_repo, "for-each-ref")
+
+
+def test_ssh_key_write_access_push_probe_rejected(git_repo, docroot):
+    repo = make_backend(git_repo)
+    repo.update()
+
+    # Like GitCode, accept the dry-run but reject the actual push.
+    hook = git_repo / ".git" / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'Read-only deploy key' >&2\nexit 1\n")
+    hook.chmod(0o755)
+
+    assert repo.has_ssh_key_with_write_access() is False
+
+
 def test_ssh_key_write_access_unknown_error_is_false(git_repo, docroot):
     repo = make_backend(git_repo, repo="git@github.com:readthedocs/test.git")
     assert _ssh_probe(repo, (1, "", "some unexpected failure")) is False
