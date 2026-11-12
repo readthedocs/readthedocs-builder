@@ -228,7 +228,18 @@ class Backend:
             )
 
             if code == 0:
-                return True
+                # These hosts reject read-only keys before the dry-run push,
+                # other hosts may only reject them once refs are pushed.
+                hosts_with_reliable_dry_run = (
+                    "github.com",
+                    "gitlab.com",
+                    "bitbucket.org",
+                    "ssh.dev.azure.com",
+                )
+                host = re.match(r"(?:ssh://)?(?:[^@/]+@)?([^:/]*)", ssh_url).group(1)
+                if host in hosts_with_reliable_dry_run:
+                    return True
+                return self._push_probe_has_write_access(remote_name)
 
             if "ERROR: This repository was archived so it is read-only" in stderr:
                 return True
@@ -277,6 +288,43 @@ class Backend:
             return False
         finally:
             self.run(binaries.CONTAINER_GIT, "remote", "remove", remote_name, record=False)
+
+    def _push_probe_has_write_access(self, remote_name: str) -> bool:
+        """
+        Confirm write access with a push that can never update any refs.
+
+        ``git push --dry-run`` doesn't send any ref updates,
+        so hosts that only check permissions when refs are updated (like GitCode)
+        accept it even for read-only keys.
+        Instead, we push two refs that conflict with each other in one atomic push.
+        The host checks permissions first, then the conflict fails the whole push,
+        so nothing is written even if the key has write access.
+        """
+        probe_ref = "refs/heads/rtd-write-access-probe"
+        code, stdout, stderr = self.run(
+            binaries.TIMEOUT,
+            "10s",
+            binaries.CONTAINER_GIT,
+            "push",
+            "--atomic",
+            remote_name,
+            f"HEAD:{probe_ref}",
+            f"HEAD:{probe_ref}/conflict",
+            record=False,
+            demux=True,
+        )
+        rejections = re.findall(r"\[remote rejected\] .* \((.*)\)", stderr)
+        if rejections and "atomic transaction failed" not in rejections:
+            return False
+        if "atomic transaction failed" not in rejections:
+            log.warning(
+                "Unexpected output when probing SSH key write access.",
+                project_slug=self.project.slug,
+                exit_code=code,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return True
 
     # ---- Submodules ----
 
