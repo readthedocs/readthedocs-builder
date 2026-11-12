@@ -236,7 +236,7 @@ class Backend:
                     "bitbucket.org",
                     "ssh.dev.azure.com",
                 )
-                host = re.match(r"(?:ssh://)?(?:[^@/]+@)?([^:/]*)", ssh_url).group(1)
+                host = re.match(r"(?:ssh://)?(?:[^@/]+@)?([^:/]*)", ssh_url).group(1).lower()
                 if host in hosts_with_reliable_dry_run:
                     return True
                 return self._push_probe_has_write_access(remote_name)
