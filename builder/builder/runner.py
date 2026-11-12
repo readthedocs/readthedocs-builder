@@ -127,17 +127,13 @@ class Runner:
             self._success = True
         except (BuildAppError, BuildCancelled, BuildUserError) as exc:
             if isinstance(exc, BuildUserError):
-                log.warning(
-                    "Build failed due to user error."
-                )
+                log.warning("Build failed due to user error.")
 
             # A cancelled build finishes as ``cancelled``, not ``finished`` —
             # the user stopped it (or a command exited 183), it didn't fail.
             if isinstance(exc, BuildCancelled):
                 self._state = BUILD_STATE_CANCELLED
-                log.info(
-                    "Build cancelled."
-                )
+                log.info("Build cancelled.")
 
             self._attach_failure_notification(exc)
             # ``BuildAppError`` represents *our* bugs (AWS failures, dispatch
