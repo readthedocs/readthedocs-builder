@@ -4,6 +4,7 @@ import subprocess
 from unittest import mock
 
 import pytest
+import structlog.testing
 
 from worker import constants
 from worker import tasks
@@ -57,6 +58,78 @@ def test_lsremote_failure_is_non_fatal_and_skips_dispatch(monkeypatch):
     exc = subprocess.CalledProcessError(128, "git ls-remote")
     app = _run(monkeypatch, project={"id": 7, "features": []}, lsremote_exc=exc)
     app.send_task.assert_not_called()
+
+
+TOKEN = "x-access-token:ghs_SECRETSECRETSECRET"
+AUTH_URL = f"https://{TOKEN}@github.com/readthedocs/private.git"
+
+
+def _run_with_token(monkeypatch, exc):
+    """``_run`` for an HTTPS private repo, returning the captured log events."""
+
+    def fake_lsremote(**kwargs):
+        raise exc
+
+    monkeypatch.setattr(tasks, "lsremote", fake_lsremote)
+    monkeypatch.setattr(tasks, "app", mock.MagicMock())
+    with structlog.testing.capture_logs() as events:
+        tasks._sync_versions(
+            project={"id": 7, "features": []},
+            repo_url="https://github.com/readthedocs/private.git",
+            ssh_key="",
+            git_env={"READTHEDOCS_GIT_CLONE_TOKEN": TOKEN},
+        )
+    return events
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # Both exceptions render the full argv -- token-bearing URL included --
+        # in ``str()``, and git's stderr quotes the URL too.
+        subprocess.CalledProcessError(
+            128,
+            ["git", "ls-remote", "--heads", "--", AUTH_URL],
+            stderr=f"fatal: unable to access '{AUTH_URL}': Could not resolve host\n",
+        ),
+        subprocess.TimeoutExpired(
+            ["git", "ls-remote", "--heads", "--", AUTH_URL],
+            timeout=300,
+            stderr=f"fatal: unable to access '{AUTH_URL}'".encode(),
+        ),
+    ],
+    ids=["CalledProcessError", "TimeoutExpired"],
+)
+def test_lsremote_failure_never_logs_the_clone_token(monkeypatch, exc):
+    events = _run_with_token(monkeypatch, exc)
+
+    assert len(events) == 1
+    rendered = repr(events[0])
+    assert "ghs_SECRETSECRETSECRET" not in rendered
+    assert TOKEN not in rendered
+    # The useful part of stderr survives, masked.
+    assert "unable to access 'https://****@github.com" in events[0]["stderr"]
+
+
+def test_lsremote_failure_logs_returncode_and_timeout(monkeypatch):
+    events = _run_with_token(monkeypatch, subprocess.CalledProcessError(128, ["git"]))
+    assert events[0]["returncode"] == 128
+    assert events[0]["timeout_seconds"] is None
+
+    events = _run_with_token(monkeypatch, subprocess.TimeoutExpired(["git"], timeout=300))
+    assert events[0]["returncode"] is None
+    assert events[0]["timeout_seconds"] == 300
+
+
+def test_redact_clone_token_handles_empty_and_bytes_stderr():
+    env = {"READTHEDOCS_GIT_CLONE_TOKEN": TOKEN}
+    assert tasks._redact_clone_token(None, env) == ""
+    assert tasks._redact_clone_token(b"", env) == ""
+    assert tasks._redact_clone_token(b"bad " + TOKEN.encode(), env) == "bad ****"
+    # No token configured (public repo): stderr passes through untouched.
+    assert tasks._redact_clone_token("fatal: nope", {}) == "fatal: nope"
+    # Long output is capped so a chatty remote can't flood the log line.
+    assert len(tasks._redact_clone_token("x" * 5000, env)) == 2000
 
 
 def test_skips_entirely_when_both_sync_flags_are_set(monkeypatch):
