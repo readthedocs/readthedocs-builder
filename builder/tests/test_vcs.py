@@ -493,6 +493,25 @@ def test_parse_submodules_handles_odd_entries(git_repo, docroot):
     ]
 
 
+def test_fetch_external_github_version_by_commit_sha(git_repo, docroot):
+    # Like a new PR on GitHub: the commit exists upstream, but no ref points at it.
+    git(git_repo, "checkout", "-b", "pr", "master")
+    git(git_repo, "commit", "--allow-empty", "-m", "PR commit")
+    sha = current_commit(git_repo)
+    git(git_repo, "checkout", "master")
+    git(git_repo, "branch", "-D", "pr")
+    git(git_repo, "config", "uploadpack.allowAnySHA1InWant", "true")
+
+    repo = make_backend(
+        git_repo, version_type=EXTERNAL, slug="9", verbose_name="9", identifier=sha
+    )
+    with mock.patch.object(type(repo.project), "is_github_project", True):
+        repo.update()
+        repo.checkout(sha)
+
+    assert current_commit(repo.working_dir) == sha
+
+
 # ---------------------------------------------------------------------------
 # get_remote_fetch_refspec — pure logic, no git needed
 # ---------------------------------------------------------------------------
