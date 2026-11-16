@@ -98,6 +98,13 @@ def test_external_github_with_commit_sha_fetches_the_sha():
     )
 
 
+def test_external_github_with_short_identifier_uses_the_pull_ref():
+    assert (
+        refspec(version_type="external", verbose_name="2109", identifier="9f4d838", is_github=True)
+        == "pull/2109/head:external-2109"
+    )
+
+
 def test_external_gitlab_uses_the_merge_request_ref():
     assert (
         refspec(version_type="external", verbose_name="42", is_github=False, is_gitlab=True)
