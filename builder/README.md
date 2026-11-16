@@ -1,12 +1,13 @@
 # builder
 
-The container-side half of a build. A standalone Python runner that builds a
-project's documentation end-to-end — clone, install tools and dependencies, run
+The build itself. A standalone Python runner that builds a project's
+documentation end-to-end — clone, install tools and dependencies, run
 Sphinx / MkDocs, upload the artifacts, and report state back to the RTD API.
 
-It runs inside a `readthedocs/build` container, started by the `worker`. It has
-no Django and no host-side `docker exec` orchestration — it's the only piece
-that touches user code. Invoked as `python -m builder --build-pk <id>`.
+It runs on the host, in-process in the `worker` Celery task, and runs every
+build command inside the `readthedocs/build` container the worker started, with
+`docker exec` — the same way the builder in `readthedocs.org` does. It has no
+Django. The worker calls it through `builder.entrypoint.run_build`.
 
 ## What happens
 
@@ -14,7 +15,8 @@ that touches user code. Invoked as `python -m builder --build-pk <id>`.
    API and reset the build to clear anything left from earlier attempts.
 
 2. **Clone & configure.** Clone the git repository and parse `.readthedocs.yaml`
-   to learn what tools, dependencies, and doctype to build.
+   to learn what tools, dependencies, and doctype to build. Then swap the clone
+   container for one running the project's `build.os` image.
 
 3. **Install.** Install the `build.tools` versions via `asdf` (with an S3-cached
    fast path), set up the language environment, and install the user's
