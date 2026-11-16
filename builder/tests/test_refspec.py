@@ -90,6 +90,14 @@ def test_external_github_uses_the_pull_ref():
     )
 
 
+def test_external_github_with_commit_sha_fetches_the_sha():
+    sha = "9f4d838c1e0b7a2d5f6e3c4b8a9d0e1f2a3b4c5d"
+    assert (
+        refspec(version_type="external", verbose_name="2109", identifier=sha, is_github=True)
+        == f"{sha}:external-2109"
+    )
+
+
 def test_external_gitlab_uses_the_merge_request_ref():
     assert (
         refspec(version_type="external", verbose_name="42", is_github=False, is_gitlab=True)
