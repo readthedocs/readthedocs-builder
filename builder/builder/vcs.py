@@ -17,6 +17,7 @@ and the parsed ``submodules`` block); until that's ported, only the
 
 import os
 import re
+import time
 from typing import Iterable
 from urllib.parse import urlparse
 
@@ -25,6 +26,7 @@ import structlog
 from builder import binaries
 from builder.constants import ALL
 from builder.constants import BRANCH
+from builder.constants import EXTERNAL
 from builder.constants import TAG
 from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
@@ -35,6 +37,11 @@ from builder.refspec import get_remote_fetch_refspec
 
 
 log = structlog.get_logger(__name__)
+
+# A new pull request's commit and ref can reach the provider a few seconds
+# after the webhook that triggered the build.
+FETCH_RETRY_DELAYS = (5, 10)
+MISSING_REF_ERRORS = ("couldn't find remote ref", "not our ref")
 
 
 class VCSVersion:
@@ -198,6 +205,17 @@ class Backend:
                     version_identifier=self.version.identifier,
                 )
 
+        if self.version.type != EXTERNAL:
+            return self.run(*cmd)
+
+        for delay in FETCH_RETRY_DELAYS:
+            code, stdout, stderr = self.run(*cmd, warn_only=True)
+            if code == 0:
+                return code, stdout, stderr
+            if not any(error in f"{stdout}{stderr or ''}" for error in MISSING_REF_ERRORS):
+                raise RepositoryError(message_id=RepositoryError.GENERIC)
+            log.info("Git fetch: ref not found yet, retrying.", delay=delay)
+            time.sleep(delay)
         return self.run(*cmd)
 
     def has_ssh_key_with_write_access(self) -> bool:

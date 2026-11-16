@@ -493,6 +493,41 @@ def test_parse_submodules_handles_odd_entries(git_repo, docroot):
     ]
 
 
+def test_fetch_external_version_retries_until_the_ref_exists(git_repo, docroot):
+    repo = make_backend(
+        git_repo, version_type=EXTERNAL, slug="9", verbose_name="9", identifier="9"
+    )
+    repo.update()
+
+    def create_ref(delay):
+        git(git_repo, "update-ref", "refs/pull/9/head", "master")
+
+    with (
+        mock.patch.object(repo, "get_remote_fetch_refspec", return_value="pull/9/head:external-9"),
+        mock.patch("builder.vcs.time.sleep", side_effect=create_ref) as sleep,
+    ):
+        code, _, _ = repo.fetch()
+
+    assert code == 0
+    assert sleep.call_count == 1
+
+
+def test_fetch_external_version_fails_when_the_ref_never_exists(git_repo, docroot):
+    repo = make_backend(
+        git_repo, version_type=EXTERNAL, slug="9", verbose_name="9", identifier="9"
+    )
+    repo.update()
+
+    with (
+        mock.patch.object(repo, "get_remote_fetch_refspec", return_value="pull/9/head:external-9"),
+        mock.patch("builder.vcs.time.sleep") as sleep,
+        pytest.raises(RepositoryError),
+    ):
+        repo.fetch()
+
+    assert sleep.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # get_remote_fetch_refspec — pure logic, no git needed
 # ---------------------------------------------------------------------------
