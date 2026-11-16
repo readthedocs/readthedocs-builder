@@ -208,13 +208,20 @@ class Backend:
         if self.version.type != EXTERNAL:
             return self.run(*cmd)
 
-        for delay in FETCH_RETRY_DELAYS:
+        attempts = len(FETCH_RETRY_DELAYS) + 1
+        for attempt, delay in enumerate(FETCH_RETRY_DELAYS, start=2):
             code, stdout, stderr = self.run(*cmd, warn_only=True)
             if code == 0:
                 return code, stdout, stderr
             if not any(error in f"{stdout}{stderr or ''}" for error in MISSING_REF_ERRORS):
                 raise RepositoryError(message_id=RepositoryError.GENERIC)
-            log.info("Git fetch: ref not found yet, retrying.", delay=delay)
+            log.info("Git fetch: ref not found yet, retrying.", delay=delay, attempt=attempt)
+            # Shown in the build output so the repeated fetch reads as a retry.
+            self.run(
+                binaries.ECHO,
+                f"Pull request not available yet, retrying git fetch in {delay} seconds "
+                f"(attempt {attempt} of {attempts})",
+            )
             time.sleep(delay)
         return self.run(*cmd)
 
