@@ -71,7 +71,7 @@ Note the project needs `Feature.USE_BUILD_ISOLATED`.
 ```
 Runner — lifecycle (reset → state transitions → validate → upload → finalize → notify)
    └── BuildDirector — orchestration (VCS → environment → install → build)
-         ├── DockerBuildEnvironment — docker exec into the build container, --user privilege drop
+         ├── DockerBuildEnvironment — docker exec into the build container
          ├── vcs.Backend       — git clone / fetch / checkout / submodules
          ├── PythonEnvironment — Virtualenv / UvEnv / Conda
          ├── backends.sphinx / .mkdocs — sphinx-build, mkdocs build, latexmk
