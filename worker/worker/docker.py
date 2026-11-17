@@ -106,11 +106,10 @@ def start_container(client, *, build_pk, build_os, memory, time_limit):
     """
     Start the build container detached and return its name.
 
-    The container runs ``sleep`` as its only process — all real work arrives
-    later as ``docker exec`` from the runner. The sleep lasts ``time_limit``
-    seconds, so the container stops itself at the build's time limit: the
-    command running at that point ends there, and returns the output it had
-    printed. It runs as the image's
+    The container runs ``sleep`` as its only process — all real work
+    arrives later as ``docker exec`` from the runner. The sleep ends at the
+    build's time limit, which stops the container and the command running in
+    it, keeping that command's output. It runs as the image's
     default user (``docs``); privileged steps get ``user="root"`` per exec,
     which is what removed the need to run the whole container as root.
 
@@ -142,7 +141,6 @@ def start_container(client, *, build_pk, build_os, memory, time_limit):
         container=name,
         image=image,
         memory=memory,
-        time_limit=time_limit,
         network=BUILD_NETWORK,
         docroot=f"{HOST_DOCROOT}:{CONTAINER_DOCROOT}",
     )

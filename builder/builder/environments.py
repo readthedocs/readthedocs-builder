@@ -486,9 +486,8 @@ class DockerBuildCommand(BuildCommand):
             self.error = self.decode_output(cmd_stderr)
             self.exit_code = client.exec_inspect(exec_id=exec_cmd["Id"])["ExitCode"]
 
-            # Surface the kill in the recorded output; the specific notification
-            # is raised by the caller. A container that stops at the build's
-            # time limit kills the command the same way an OOM does.
+            # Surface an OOM kill in the recorded output; the specific
+            # ``BUILD_EXCESSIVE_MEMORY`` notification is raised by the caller.
             if _killed_by_oom(self.exit_code, self.output):
                 self.output += "\n\nCommand killed due to timeout or excessive memory consumption\n"
         except DockerAPIError:

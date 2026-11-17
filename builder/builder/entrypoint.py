@@ -53,8 +53,7 @@ def run_build(
     :param start_build_container: Called once the config is read,
         to replace the clone container (``container_name``)
         with one running the project's ``build.os``.
-    :param deadline: ``time.monotonic()`` value at which the build container
-        stops itself, because the build reached its time limit.
+    :param deadline: ``time.monotonic()`` at which the build container stops itself.
     :param production_domain: dashboard domain, used for the build URL and the
         ``READTHEDOCS_PRODUCTION_DOMAIN`` variable user commands see.
     :param allow_private_repos: whether this Read the Docs supports private

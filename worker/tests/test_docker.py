@@ -139,8 +139,7 @@ def test_start_container_carries_no_environment(client):
 def test_start_container_idles_as_pid_1_until_the_time_limit(client):
     """
     ``exec`` so the sleep is PID 1 and receives ``docker kill``'s signal
-    directly, rather than a shell swallowing it. The sleep ending is what
-    stops the container, and the command running in it, at the time limit.
+    directly, rather than a shell swallowing it. It sleeps for the time limit.
     """
     start_container(client, time_limit=600)
 

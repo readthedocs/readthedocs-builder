@@ -20,7 +20,6 @@ starting a container to clone the repository in.
 """
 
 import contextlib
-import math
 import os
 import signal
 import socket
@@ -307,8 +306,7 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                 build_pk=build_pk,
                 build_os=build_os,
                 memory=memory,
-                # Rounded up, so the container never stops before the deadline.
-                time_limit=max(math.ceil(deadline - time.monotonic()), 1),
+                time_limit=max(deadline - time.monotonic(), 1),
             )
             _start_healthcheck(docker_client, name, environment, build_pk)
             return name
@@ -324,7 +322,9 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                 _fail_build(api_client, build_pk, exc)
                 return
 
-            with _time_limit(time_limit_seconds + constants.BUILD_TIME_LIMIT_GRACE):
+            # The container stops itself at the time limit. The alarm comes
+            # later, for a build stuck outside the container.
+            with _time_limit(time_limit_seconds + 60):
                 run_builder(
                     api_client=api_client,
                     docker_client=docker_client,

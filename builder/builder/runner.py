@@ -126,7 +126,12 @@ class Runner:
 
             self._success = True
         except (BuildAppError, BuildCancelled, BuildUserError) as exc:
-            if self._timed_out(exc):
+            # The container stops at the time limit, failing the running command.
+            if (
+                not isinstance(exc, (BuildAppError, BuildCancelled))
+                and self.data.deadline
+                and time.monotonic() >= self.data.deadline
+            ):
                 exc = BuildUserError(BuildUserError.BUILD_TIME_OUT)
 
             if isinstance(exc, BuildUserError):
@@ -168,31 +173,15 @@ class Runner:
 
     # ---- Wall-clock timeout (cooperates with worker.tasks._time_limit) ----
 
-    def _timed_out(self, exc):
-        """
-        Whether the build failed because it reached its time limit.
-
-        The build container stops itself at the limit. The command running in
-        it ends there, with its output, and fails the build like any other
-        failed command, so the time is what tells the two apart.
-        """
-        return (
-            self.data.deadline is not None
-            and time.monotonic() >= self.data.deadline
-            and isinstance(exc, BuildUserError)
-            and not isinstance(exc, BuildCancelled)
-        )
-
     def _install_timeout_handler(self):
         """
         Convert SIGALRM into a :class:`BuildUserError(BUILD_TIME_OUT)`.
 
-        The build container enforces the time limit for the commands it runs.
-        The worker sends SIGALRM a little after that, to stop a build that is
-        stuck outside the container. We translate it into a controlled
-        exception so the lifecycle's ``try/except/finally`` runs
-        (notification + finalize PATCH) before exiting, rather than the
-        process being killed abruptly mid-step.
+        The worker waits out the wall-clock budget and then sends SIGALRM
+        to this process. We translate it into a controlled exception so
+        the lifecycle's ``try/except/finally`` runs (notification +
+        finalize PATCH) before exiting, rather than the process being
+        killed abruptly mid-step.
 
         If Python is wedged somewhere that never runs bytecode the alarm
         can't fire at all; Celery's own soft and hard task time limits (see
