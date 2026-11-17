@@ -9,8 +9,8 @@ process per EC2 instance in the `build-isolated` ASG. The worker consumes the
 `run_build` task arrives, so it handles a single build and then the instance
 is terminated.
 
-It never imports the runner and never touches user code — the host orchestrates,
-the container builds.
+It runs the builder in-process, which `docker exec`s each build command into the
+build container. User code never runs on the host.
 
 ## What happens
 

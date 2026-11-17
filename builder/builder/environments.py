@@ -10,9 +10,9 @@ build container via ``docker exec``, the same way upstream's
 the worker; this module only execs into it by name, which it reads from
 ``build_env.container_name``.
 
-Privilege drop is ``docker exec --user`` — there is no ``runuser``
-wrapping, and no user database lookup, because the user is resolved by
-Docker inside the container rather than by us on the host.
+Each command runs as the user passed to ``docker exec --user``, which
+Docker resolves inside the container, so there's no user database lookup on
+the host.
 
 :class:`BuildEnvironment` / :class:`BuildCommand` run commands as plain
 subprocesses and exist **for tests only** — see the warning on that class.
