@@ -488,10 +488,8 @@ class DockerBuildCommand(BuildCommand):
 
             # Surface an OOM kill in the recorded output; the specific
             # ``BUILD_EXCESSIVE_MEMORY`` notification is raised by the caller.
-            # The container is also killed when the build hits its time limit,
-            # which looks the same from here.
             if _killed_by_oom(self.exit_code, self.output):
-                self.output += "\n\nCommand killed due to timeout or excessive memory consumption\n"
+                self.output += "\n\nCommand killed due to excessive memory consumption\n"
         except DockerAPIError:
             log.exception("Docker API error running build command.")
             self.exit_code = -1
@@ -650,7 +648,7 @@ class BuildEnvironment:
                 # In production the API recording captures it for the build
                 # web UI, but with ``record=False`` (dev runs) the output
                 # would otherwise be lost entirely.
-                log.error(
+                log.warning(
                     "Build command failed",
                     command=build_cmd.get_command(),
                     exit_code=build_cmd.exit_code,

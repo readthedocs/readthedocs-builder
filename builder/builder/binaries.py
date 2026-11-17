@@ -34,5 +34,6 @@ ZIP = "/usr/bin/zip"
 UNZIP = "/usr/bin/unzip"
 CURL = "/usr/bin/curl"
 SLEEP = "/usr/bin/sleep"
+ECHO = "/usr/bin/echo"
 # PATH for super-user execs: system directories only.
 SUPER_USER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
