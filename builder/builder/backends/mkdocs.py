@@ -72,9 +72,8 @@ class BaseMkdocs(BaseBuilder):
     def get_mkdocs_cmd(self):
         """Pick ``uv run mkdocs`` or ``python -m mkdocs`` based on the env."""
         if isinstance(self.python_env, UvEnv):
-            # See ``SphinxBuilder.get_sphinx_cmd``: skip the implicit re-sync and
-            # dev dependency groups. Matches upstream.
-            return ("uv", "run", "--no-sync", "--no-dev", "mkdocs")
+            # See ``SphinxBuilder.get_sphinx_cmd``: skip the implicit re-sync.
+            return ("uv", "run", "--no-sync", "mkdocs")
 
         return (
             self.python_env.venv_bin(filename="python"),
