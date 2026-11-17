@@ -112,8 +112,8 @@ class BuildDirector:
         4. Read the config file, fail on legacy/invalid forms.
         5. Update submodules per the config.
         """
-        # Create the checkout dir through the build environment so it's wrapped
-        # in ``runuser`` and owned by the build user.
+        # Create the checkout dir through the build environment so it's created
+        # inside the container and owned by the build user.
         if not os.path.exists(self.data.project.doc_path):
             self.vcs_environment.run(
                 binaries.MKDIR,
@@ -475,8 +475,8 @@ class BuildDirector:
 
         User commands are intentionally not escaped, are run from the
         repository checkout, and inherit the same env vars as built-in
-        commands. The ``runuser`` privilege drop in BuildEnvironment keeps
-        them out of root.
+        commands. They run in the build container as ``RTD_DOCKER_USER``,
+        not root.
         """
         commands = get_dotted_attribute(self.data.config, f"build.jobs.{job}", None)
         if not commands:

@@ -22,9 +22,8 @@ DOCROOT = os.environ.get("RTD_DOCROOT", "/home/docs/checkouts")
 # healthcheck endpoint matches its ``?builder=`` param against.
 RTD_BUILDER_HOSTNAME = os.environ.get("RTD_BUILDER_HOSTNAME") or socket.gethostname()
 
-# Container user split, enforced by ``docker exec --user``: user code runs as
-# RTD_DOCKER_USER; ``apt-get`` and other privileged commands run as
-# RTD_DOCKER_SUPER_USER.
+# Users passed to ``docker exec --user``: user code runs as RTD_DOCKER_USER;
+# ``apt-get`` and other privileged commands run as RTD_DOCKER_SUPER_USER.
 RTD_DOCKER_USER = os.environ.get("RTD_DOCKER_USER", "docs")
 # Numeric ids for the same user. Needed because the runner may have to chown a
 # file *for* the build container from a process where that user doesn't exist

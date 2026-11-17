@@ -85,8 +85,8 @@ class Backend:
 
     def check_working_dir(self) -> None:
         if not os.path.exists(self.working_dir):
-            # Create the dir through the build environment so it's wrapped in
-            # ``runuser`` and owned by the build user.
+            # Create the dir through the build environment so it's created
+            # inside the container and owned by the build user.
             # ``cwd="/"`` is just a guaranteed-existing directory to spawn from (the path is absolute).
             self.environment.run(
                 binaries.MKDIR,
