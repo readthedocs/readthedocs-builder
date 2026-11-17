@@ -59,7 +59,7 @@ def test_get_sphinx_cmd_uses_uv_run_for_uv_env(docroot):
         },
         env_cls=UvEnv,
     )
-    assert builder.get_sphinx_cmd() == ("uv", "run", "--no-sync", "--no-dev", "sphinx-build")
+    assert builder.get_sphinx_cmd() == ("uv", "run", "--no-sync", "sphinx-build")
 
 
 def test_get_sphinx_cmd_uses_python_module_for_virtualenv(docroot):
@@ -326,7 +326,7 @@ def test_get_mkdocs_cmd_uses_uv_run_for_uv_env(docroot):
         },
         env_cls=UvEnv,
     )
-    assert builder.get_mkdocs_cmd() == ("uv", "run", "--no-sync", "--no-dev", "mkdocs")
+    assert builder.get_mkdocs_cmd() == ("uv", "run", "--no-sync", "mkdocs")
 
 
 def test_get_mkdocs_cmd_uses_python_module_for_virtualenv(docroot):

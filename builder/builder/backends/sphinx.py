@@ -132,8 +132,7 @@ class BaseSphinx(BaseBuilder):
         if isinstance(self.python_env, UvEnv):
             # ``--no-sync``: the env was already synced by ``python.install``;
             # re-syncing here would reinstall (and fail without a lockfile).
-            # ``--no-dev``: don't pull in dev dependency groups. Matches upstream.
-            return ("uv", "run", "--no-sync", "--no-dev", "sphinx-build")
+            return ("uv", "run", "--no-sync", "sphinx-build")
 
         return (
             self.python_env.venv_bin(filename="python"),
