@@ -9,6 +9,7 @@ Everything else in ``run()`` (API claims, artifact upload, signal handlers) is
 stubbed at the runner's own seams.
 """
 
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -587,3 +588,48 @@ def test_check_media_size_skips_unknown_sizes(docroot):
     runner._check_media_size(None, "html")
 
     runner.director.attach_notification.assert_not_called()
+
+
+def _fail_the_build(*, deadline, exc):
+    runner = _make_runner(
+        {
+            "build": {"os": "ubuntu-22.04", "tools": {"python": "3"}},
+            "sphinx": {"configuration": "conf.py"},
+        }
+    )
+    runner.data.deadline = deadline
+    runner._attach_failure_notification = mock.MagicMock()
+    runner.director.build.side_effect = exc
+
+    runner.run()
+
+    (reported,), _ = runner._attach_failure_notification.call_args
+    return reported
+
+
+def test_a_failure_after_the_deadline_is_reported_as_a_timeout(docroot):
+    # The container stopped at the time limit and took the running command with it.
+    reported = _fail_the_build(
+        deadline=time.monotonic() - 1,
+        exc=BuildUserError(BuildUserError.BUILD_EXCESSIVE_MEMORY),
+    )
+
+    assert reported.message_id == BuildUserError.BUILD_TIME_OUT
+
+
+def test_a_failure_before_the_deadline_is_reported_as_itself(docroot):
+    reported = _fail_the_build(
+        deadline=time.monotonic() + 600,
+        exc=BuildUserError(BuildUserError.BUILD_EXCESSIVE_MEMORY),
+    )
+
+    assert reported.message_id == BuildUserError.BUILD_EXCESSIVE_MEMORY
+
+
+def test_a_cancellation_after_the_deadline_stays_a_cancellation(docroot):
+    reported = _fail_the_build(
+        deadline=time.monotonic() - 1,
+        exc=BuildCancelled(BuildCancelled.CANCELLED_BY_USER),
+    )
+
+    assert isinstance(reported, BuildCancelled)

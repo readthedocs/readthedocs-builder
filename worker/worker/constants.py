@@ -6,6 +6,11 @@ BUILD_MEMORY_LIMIT = "7g"
 # Seconds. Applied when ``project.container_time_limit`` is unset.
 BUILD_TIME_LIMIT = 900
 
+# Seconds past the time limit before the worker interrupts the build itself.
+# The build container stops at the limit, which fails the build cleanly; this
+# only bounds work the runner does outside it, such as uploading artifacts.
+BUILD_TIME_LIMIT_GRACE = 60
+
 # Image for uploaded builds.
 UPLOADED_BUILD_OS = "ubuntu-26.04"
 

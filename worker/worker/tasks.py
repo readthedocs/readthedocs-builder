@@ -20,10 +20,12 @@ starting a container to clone the repository in.
 """
 
 import contextlib
+import math
 import os
 import signal
 import socket
 import subprocess
+import time
 
 import structlog
 from builder.api_client import get_build
@@ -295,12 +297,18 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
         # One client for the whole build: the worker starts and stops the
         # container with it, and the runner execs into it with the same one.
         docker_client = get_client()
+        deadline = time.monotonic() + time_limit_seconds
 
         def start_build_container(build_os):
             """Start (replacing any previous) the build container, with its healthcheck."""
             structlog.contextvars.bind_contextvars(build_os=build_os)
             name = start_container(
-                docker_client, build_pk=build_pk, build_os=build_os, memory=memory
+                docker_client,
+                build_pk=build_pk,
+                build_os=build_os,
+                memory=memory,
+                # Rounded up, so the container never stops before the deadline.
+                time_limit=max(math.ceil(deadline - time.monotonic()), 1),
             )
             _start_healthcheck(docker_client, name, environment, build_pk)
             return name
@@ -316,7 +324,7 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                 _fail_build(api_client, build_pk, exc)
                 return
 
-            with _time_limit(time_limit_seconds):
+            with _time_limit(time_limit_seconds + constants.BUILD_TIME_LIMIT_GRACE):
                 run_builder(
                     api_client=api_client,
                     docker_client=docker_client,
@@ -324,6 +332,7 @@ def run_build(self, *, build_pk, build_api_key, environment, no_self_terminate=F
                     version=version,
                     container_name=container,
                     start_build_container=start_build_container,
+                    deadline=deadline,
                     production_domain=production_domain,
                     allow_private_repos=_to_bool(environment.get("RTD_ALLOW_PRIVATE_REPOS")),
                     s3_endpoint_url=environment.get("AWS_S3_ENDPOINT_URL") or None,

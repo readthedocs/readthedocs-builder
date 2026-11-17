@@ -45,7 +45,7 @@ def client():
 
 
 def start_container(client, **kwargs):
-    defaults = dict(build_pk=42, build_os="ubuntu-24.04", memory="7g")
+    defaults = dict(build_pk=42, build_os="ubuntu-24.04", memory="7g", time_limit=900)
     return docker.start_container(client, **{**defaults, **kwargs})
 
 
@@ -136,14 +136,15 @@ def test_start_container_carries_no_environment(client):
     assert not client.created.get("environment")
 
 
-def test_start_container_idles_as_pid_1(client):
+def test_start_container_idles_as_pid_1_until_the_time_limit(client):
     """
     ``exec`` so the sleep is PID 1 and receives ``docker kill``'s signal
-    directly, rather than a shell swallowing it.
+    directly, rather than a shell swallowing it. The sleep ending is what
+    stops the container, and the command running in it, at the time limit.
     """
-    start_container(client)
+    start_container(client, time_limit=600)
 
-    assert client.created["entrypoint"] == ["/bin/sh", "-c", f"exec {binaries.SLEEP} infinity"]
+    assert client.created["entrypoint"] == ["/bin/sh", "-c", f"exec {binaries.SLEEP} 600"]
 
 
 def test_stop_container_force_removes_it(client):
