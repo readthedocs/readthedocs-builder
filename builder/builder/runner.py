@@ -126,6 +126,14 @@ class Runner:
 
             self._success = True
         except (BuildAppError, BuildCancelled, BuildUserError) as exc:
+            # The container stops at the time limit, failing the running command.
+            if (
+                not isinstance(exc, (BuildAppError, BuildCancelled))
+                and self.data.deadline
+                and time.monotonic() >= self.data.deadline
+            ):
+                exc = BuildUserError(BuildUserError.BUILD_TIME_OUT)
+
             if isinstance(exc, BuildUserError):
                 log.warning("Build failed due to user error.")
 

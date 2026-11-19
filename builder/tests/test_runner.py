@@ -9,6 +9,7 @@ Everything else in ``run()`` (API claims, artifact upload, signal handlers) is
 stubbed at the runner's own seams.
 """
 
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -587,3 +588,24 @@ def test_check_media_size_skips_unknown_sizes(docroot):
     runner._check_media_size(None, "html")
 
     runner.director.attach_notification.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "seconds_left, message_id",
+    [(-1, BuildUserError.BUILD_TIME_OUT), (600, BuildUserError.GENERIC)],
+)
+def test_a_failure_after_the_deadline_is_reported_as_a_timeout(docroot, seconds_left, message_id):
+    runner = _make_runner(
+        {
+            "build": {"os": "ubuntu-22.04", "tools": {"python": "3"}},
+            "sphinx": {"configuration": "conf.py"},
+        }
+    )
+    runner.data.deadline = time.monotonic() + seconds_left
+    runner._attach_failure_notification = mock.MagicMock()
+    runner.director.build.side_effect = BuildUserError(BuildUserError.GENERIC)
+
+    runner.run()
+
+    (reported,), _ = runner._attach_failure_notification.call_args
+    assert reported.message_id == message_id

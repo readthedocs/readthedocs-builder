@@ -36,6 +36,7 @@ def run_build(
     allow_private_repos: bool = False,
     s3_endpoint_url: str | None = None,
     start_build_container=None,
+    deadline: float | None = None,
 ) -> bool:
     """
     Run ``build``. Returns its success boolean.
@@ -52,6 +53,7 @@ def run_build(
     :param start_build_container: Called once the config is read,
         to replace the clone container (``container_name``)
         with one running the project's ``build.os``.
+    :param deadline: ``time.monotonic()`` at which the build container stops itself.
     :param production_domain: dashboard domain, used for the build URL and the
         ``READTHEDOCS_PRODUCTION_DOMAIN`` variable user commands see.
     :param allow_private_repos: whether this Read the Docs supports private
@@ -86,6 +88,7 @@ def run_build(
         build=build,
         container_name=container_name,
         start_build_container=start_build_container,
+        deadline=deadline,
         docker_client=docker_client,
         production_domain=production_domain,
         allow_private_repos=allow_private_repos,
