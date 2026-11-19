@@ -725,18 +725,18 @@ class BuildDirector:
         and the build environment. The key never touches disk:
         it is piped to ``ssh-add`` from an environment variable.
 
-        No-op for public/HTTPS repos, or when private repos aren't allowed.
+        Runs whenever private repos are allowed and the project has a deploy
+        key, regardless of the repo URL scheme (matching readthedocs-corporate),
+        so HTTPS repos with SSH submodules or SSH dependencies still work.
+
+        No-op when private repos aren't allowed or the project has no key.
         """
         if not self.data.allow_private_repos:
             return
 
-        repo_url = self.data.project.repo or ""
-        if not (repo_url.startswith("git@") or repo_url.startswith("ssh://")):
-            return
-
         private_key = get_project_ssh_key(self.data.api_client, self.data.project.pk)
         if not private_key:
-            log.warning("SSH repository has no deploy key; skipping ssh-agent setup.")
+            log.warning("Project has no deploy key; skipping ssh-agent setup.")
             return
 
         agent = environment.run(binaries.CONTAINER_SSH_AGENT, "-s", record=False)
