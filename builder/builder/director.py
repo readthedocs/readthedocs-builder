@@ -726,7 +726,8 @@ class BuildDirector:
         it is piped to ``ssh-add`` from an environment variable.
 
         Runs whenever private repos are allowed and the project has a deploy
-        key, regardless of the repo URL scheme, so HTTPS repos with SSH submodules or SSH dependencies still work.
+        key, regardless of the repo URL scheme, so HTTPS repos with SSH
+        submodules or SSH dependencies still work.
 
         No-op when private repos aren't allowed or the project has no key.
         """
