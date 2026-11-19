@@ -153,10 +153,8 @@ class BuildDirector:
         if commit:
             self.data.build["commit"] = commit
 
-        # Pull request builds: report the base commit once the PR has merged it
-        # in, so the file tree diff refreshes the base snapshot it compares
-        # against (see ``FileManifestIndexer`` in readthedocs.org). Only the
-        # clone can answer this, which is why it's the builder's job.
+        # Report the base commit once the PR has merged it in,
+        # so readthedocs.org refreshes the file tree diff's base snapshot.
         base_commit = self.data.version.base_commit
         if (
             self.data.version.is_external

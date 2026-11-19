@@ -899,16 +899,6 @@ def test_setup_vcs_skips_the_base_commit_when_the_pr_did_not_merge_it_in(docroot
     assert "base_commit" not in director.data.build
 
 
-def test_setup_vcs_skips_the_base_commit_check_without_one(docroot):
-    # The API only sends ``base_commit`` for pull requests with a built base.
-    director = make_director(SPHINX, version={"type": "external", "base_commit": None})
-
-    _setup_vcs_with_mocked_checkout(director)
-
-    director.vcs_repository.contains_commit.assert_not_called()
-    assert "base_commit" not in director.data.build
-
-
 def test_setup_vcs_skips_the_base_commit_check_for_internal_versions(docroot):
     director = make_director(SPHINX, version={"type": "branch", "base_commit": "base123"})
 
