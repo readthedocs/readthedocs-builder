@@ -11,15 +11,8 @@ possible. Differences, all forced by the runner having no Django:
 - ``RCloneLocal`` is dropped — the runner only ever talks to S3 (dev included,
   via ``AWS_S3_ENDPOINT_URL`` pointing at rustfs).
 
-This module runs *inside* the build container: the runner uploads its own
-artifacts, and the worker stays out of the artifact path. The
-``readthedocs/build`` images don't ship rclone, so the worker bind-mounts the
-host's binary onto ``/usr/local/bin/rclone`` — hence plain ``rclone`` resolves
-here off PATH. See ``worker.docker.HOST_RCLONE_PATH``.
-
-TODO: install rclone in the ``readthedocs/build`` images
-(readthedocs-docker-images) and drop the bind-mount. Keep the upload in the
-container either way.
+This module runs on the builder host (the runner is in-process with the
+worker), using the ``rclone`` installed there. See ``builder.binaries``.
 """
 
 import os
@@ -28,6 +21,8 @@ import posixpath
 import subprocess
 
 import structlog
+
+from builder import binaries
 
 
 log = structlog.get_logger(__name__)
@@ -131,7 +126,7 @@ class BaseRClone:
     """
 
     remote_type = None
-    rclone_bin = "rclone"
+    rclone_bin = binaries.RCLONE
     default_options = [
         # Number of file transfers to run in parallel.
         # Default value is 4.

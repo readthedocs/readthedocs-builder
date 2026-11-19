@@ -10,6 +10,7 @@ from conftest import API_URL
 from conftest import JSON
 from worker import constants
 from worker import tasks
+from worker.exceptions import BuildAlreadyFinished
 from worker.exceptions import BuildAppError
 from worker.exceptions import BuildUserError
 from worker.exceptions import PreContainerFailure
@@ -76,15 +77,11 @@ def mock_api(requests_mock):
 
 
 @pytest.fixture
-def prepare_build(monkeypatch, tmp_path, write_config, api_client, mock_api):
-    """Run ``_prepare_build`` against the mocked API, with the clone stubbed."""
+def prepare_build(api_client, mock_api):
+    """Run ``_prepare_build`` against the mocked API."""
 
-    def _prepare(project=None, build_os="ubuntu-24.04"):
-        mock_api(project=project)
-        config = write_config(
-            tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": build_os}}
-        )
-        monkeypatch.setattr(tasks, "sparse_clone_yaml", lambda **kwargs: config)
+    def _prepare(project=None, version=None):
+        mock_api(project=project, version=version)
 
         build, version = tasks._fetch_build(api_client, 42)
         return tasks._prepare_build(api_client=api_client, build=build, version=version)
@@ -93,14 +90,14 @@ def prepare_build(monkeypatch, tmp_path, write_config, api_client, mock_api):
 
 
 def test_prepare_build_falls_back_to_the_default_resources(prepare_build):
-    _, memory, time_limit = prepare_build()
+    memory, time_limit = prepare_build()
 
     assert memory == constants.BUILD_MEMORY_LIMIT
     assert time_limit == constants.BUILD_TIME_LIMIT
 
 
 def test_prepare_build_uses_the_project_resources(prepare_build):
-    _, memory, time_limit = prepare_build(
+    memory, time_limit = prepare_build(
         project={"container_mem_limit": "2g", "container_time_limit": 600}
     )
 
@@ -110,7 +107,7 @@ def test_prepare_build_uses_the_project_resources(prepare_build):
 
 def test_prepare_build_does_not_cap_large_project_resources(prepare_build):
     """We trust container_*_limit; there is no worker-side ceiling."""
-    _, memory, time_limit = prepare_build(
+    memory, time_limit = prepare_build(
         project={"container_mem_limit": "64g", "container_time_limit": 108000}
     )
 
@@ -118,10 +115,6 @@ def test_prepare_build_does_not_cap_large_project_resources(prepare_build):
     assert time_limit == 108000
 
 
-def test_prepare_build_resolves_the_build_os(prepare_build):
-    build_os, _, _ = prepare_build(build_os="ubuntu-22.04")
-
-    assert build_os == "ubuntu-22.04"
 
 
 
@@ -132,7 +125,7 @@ def test_prepare_build_returns_the_projects_time_limit(prepare_build):
     It used to be an env var read by a bash watchdog inside the container; the
     worker now arms a SIGALRM around the build instead.
     """
-    _, _, time_limit = prepare_build(project={"container_time_limit": 600})
+    _, time_limit = prepare_build(project={"container_time_limit": 600})
 
     assert time_limit == 600
 
@@ -148,82 +141,35 @@ def test_prepare_build_does_not_claim_the_build(prepare_build, requests_mock):
 
 
 
-def test_prepare_build_passes_the_custom_yaml_path_to_the_clone(
-    monkeypatch, tmp_path, write_config, api_client, mock_api
+
+
+
+
+
+
+
+
+@pytest.fixture
+def sync_versions_calls(monkeypatch):
+    """Replace ``_sync_versions`` with a spy and return its captured calls."""
+    calls = []
+    monkeypatch.setattr(tasks, "_sync_versions", lambda **kwargs: calls.append(kwargs))
+    return calls
+
+
+def test_prepare_build_syncs_versions_for_branch_versions(prepare_build, sync_versions_calls):
+    prepare_build(version={"type": "branch", "verbose_name": "main"})
+
+    assert len(sync_versions_calls) == 1
+
+
+def test_prepare_build_skips_syncing_versions_for_external_versions(
+    prepare_build, sync_versions_calls
 ):
-    seen = {}
-    config = write_config(
-        tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": "ubuntu-24.04"}}
-    )
-    mock_api(project={"readthedocs_yaml_path": "subpath/docs/.readthedocs.yaml"})
+    # A PR build can't add or remove tags/branches, so there is nothing to sync.
+    prepare_build(version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"})
 
-    def fake_clone(**kwargs):
-        seen.update(kwargs)
-        return config
-
-    monkeypatch.setattr(tasks, "sparse_clone_yaml", fake_clone)
-
-    build, version = tasks._fetch_build(api_client, 42)
-    tasks._prepare_build(api_client=api_client, build=build, version=version)
-
-    assert seen["yaml_path"] == "subpath/docs/.readthedocs.yaml"
-
-
-def _capture_bootstrap_refspec(monkeypatch, tmp_path, write_config, api_client, mock_api, version):
-    """Run ``_prepare_build`` with the clone stubbed and return the refspec used."""
-    seen = {}
-    config = write_config(
-        tmp_path / ".readthedocs.yaml", {"version": 2, "build": {"os": "ubuntu-24.04"}}
-    )
-    mock_api(version=version)
-
-    def fake_clone(**kwargs):
-        seen.update(kwargs)
-        return config
-
-    monkeypatch.setattr(tasks, "sparse_clone_yaml", fake_clone)
-    build, version = tasks._fetch_build(api_client, 42)
-    tasks._prepare_build(api_client=api_client, build=build, version=version)
-    return seen["refspec"]
-
-
-def test_prepare_build_fetches_the_branch_refspec(
-    monkeypatch, tmp_path, write_config, api_client, mock_api
-):
-    refspec = _capture_bootstrap_refspec(
-        monkeypatch,
-        tmp_path,
-        write_config,
-        api_client,
-        mock_api,
-        version={"type": "branch", "verbose_name": "mybranch", "identifier": "mybranch"},
-    )
-    assert refspec == "refs/heads/mybranch:refs/remotes/origin/mybranch"
-
-
-def test_prepare_build_fetches_the_pr_refspec_for_external_versions(
-    monkeypatch, tmp_path, write_config, api_client, mock_api
-):
-    refspec = _capture_bootstrap_refspec(
-        monkeypatch,
-        tmp_path,
-        write_config,
-        api_client,
-        mock_api,
-        version={"type": "external", "verbose_name": "2109", "identifier": "9f4d838"},
-    )
-    assert refspec == "pull/2109/head:external-2109"
-
-
-def test_prepare_build_fails_when_the_config_file_is_missing(monkeypatch, api_client, mock_api):
-    mock_api()
-    monkeypatch.setattr(tasks, "sparse_clone_yaml", lambda **kwargs: None)
-    build, version = tasks._fetch_build(api_client, 42)
-
-    with pytest.raises(PreContainerFailure) as excinfo:
-        tasks._prepare_build(api_client=api_client, build=build, version=version)
-
-    assert excinfo.value.message_id == BuildUserError.NO_CONFIG_FILE_DEPRECATED
+    assert sync_versions_calls == []
 
 
 def test_fetch_build_fails_when_the_build_has_no_version(api_client, requests_mock):
@@ -259,6 +205,22 @@ def test_fetch_build_raises_cancelled_when_the_build_was_cancelled_while_queued(
         tasks._fetch_build(api_client, 42)
 
     # Stops before the version is fetched.
+    assert not requests_for(requests_mock, "GET", "/api/v2/version/10/")
+
+
+def test_fetch_build_raises_already_finished_when_the_build_already_completed(
+    api_client, requests_mock
+):
+    # A redelivered task for a finished build must not reset or rebuild it.
+    requests_mock.get(
+        f"{API_URL}/api/v2/build/42/",
+        json={"id": 42, "version": 10, "state": "finished"},
+        headers=JSON,
+    )
+
+    with pytest.raises(BuildAlreadyFinished):
+        tasks._fetch_build(api_client, 42)
+
     assert not requests_for(requests_mock, "GET", "/api/v2/version/10/")
 
 
@@ -316,101 +278,167 @@ def test_cancel_build_finalizes_the_build_as_cancelled(api_client, fail_build_ap
 
 def test_cancellation_handlers_raise_build_cancelled():
     """A revoke lands as SIGINT; it must not surface as a KeyboardInterrupt."""
-    previous = signal.getsignal(signal.SIGINT)
-    try:
-        tasks._install_cancellation_handlers()
-
-        with pytest.raises(BuildCancelled) as excinfo:
+    with pytest.raises(BuildCancelled) as excinfo, tasks._cancellation_handlers():
             os.kill(os.getpid(), signal.SIGINT)
-    finally:
-        signal.signal(signal.SIGINT, previous)
 
     assert excinfo.value.message_id == BuildCancelled.CANCELLED_BY_USER
 
 
+def test_cancellation_handlers_are_restored_after_the_task():
+    """Otherwise billiard's recycle SIGTERM logs a false cancellation."""
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    with tasks._cancellation_handlers():
+        assert signal.getsignal(signal.SIGTERM) is not previous[signal.SIGTERM]
+
+    assert {sig: signal.getsignal(sig) for sig in previous} == previous
+
+
 @pytest.fixture
-def postrun(monkeypatch):
-    """Record the ordered instance-lifecycle calls the postrun handler makes."""
+def consumer():
+    """A stand-in for the Celery Consumer that records cancelled queues."""
+    cancelled = []
+    return types.SimpleNamespace(cancel_task_queue=cancelled.append, cancelled=cancelled)
+
+
+def test_task_received_cancels_the_queue_consumer(consumer):
+    """
+    The main process must stop consuming on the first build, or it grabs a
+    second one while the instance is already terminating.
+    """
+    request = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == ["build:isolated"]
+
+
+def test_task_received_keeps_consuming_under_docker_compose(consumer, monkeypatch):
+    monkeypatch.setenv("RTD_DOCKER_COMPOSE", "1")
+    request = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == []
+
+
+def test_task_received_ignores_other_tasks(consumer):
+    request = types.SimpleNamespace(name="some.other.task")
+
+    tasks._on_run_build_received(consumer, request=request)
+
+    assert consumer.cancelled == []
+
+
+RELEASE_PATH = "/api/v2/build/42/instance/release/"
+POSTRUN_KWARGS = {
+    "build_pk": 42,
+    "build_api_key": "TOKEN",
+    "environment": {"RTD_API_URL": API_URL, "RTD_PRODUCTION_DOMAIN": "readthedocs.org"},
+    "no_self_terminate": False,
+}
+
+
+@pytest.fixture
+def poweroff(monkeypatch):
+    """Record the power-off fallback; the API side is mocked per test."""
     calls = []
-    monkeypatch.setattr(tasks, "self_terminate", lambda: calls.append("terminated"))
-    monkeypatch.setattr(
-        tasks, "set_scale_in_protection", lambda protected: calls.append(f"protected={protected}")
-    )
+    monkeypatch.setattr(tasks.instance, "poweroff", lambda: calls.append("poweroff"))
     return calls
 
 
-def test_postrun_self_terminates_after_a_build(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
-
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
-
-    assert "terminated" in postrun
+def _postrun(sender_name=constants.RUN_BUILD_TASK_NAME, **overrides):
+    sender = types.SimpleNamespace(name=sender_name)
+    tasks._on_run_build_postrun(sender, kwargs={**POSTRUN_KWARGS, **overrides})
 
 
-def test_postrun_releases_scale_in_protection_before_terminating(postrun):
-    """
-    Order matters: TerminateInstanceInAutoScalingGroup refuses to terminate a
-    protected instance, which would strand it in the ASG.
-    """
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
-
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": False})
-
-    assert postrun == ["protected=False", "terminated"]
+def _release_api(requests_mock, state):
+    requests_mock.post(
+        f"{API_URL}{RELEASE_PATH}",
+        json={"state": state, "decremented": False},
+        headers=JSON,
+    )
 
 
-def test_postrun_skips_self_terminate_when_asked(postrun):
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
+def test_postrun_releases_the_instance_through_the_api(poweroff, requests_mock):
+    _release_api(requests_mock, "terminated")
 
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
+    _postrun()
 
-    assert "terminated" not in postrun
-
-
-def test_postrun_releases_scale_in_protection_even_when_not_terminating(postrun):
-    """A protected instance can't be scaled in either — never leave it set."""
-    sender = types.SimpleNamespace(name="worker.tasks.run_build")
-
-    tasks._on_run_build_postrun(sender, kwargs={"no_self_terminate": True})
-
-    assert postrun == ["protected=False"]
+    (request,) = requests_for(requests_mock, "POST", RELEASE_PATH)
+    assert request.headers["Authorization"] == "Token TOKEN"
+    assert request.headers["Host"] == "readthedocs.org"
+    assert poweroff == []
 
 
-def test_postrun_ignores_other_tasks(postrun):
-    """Only run_build owns the instance; nothing else may touch it."""
-    sender = types.SimpleNamespace(name="some.other.task")
+def test_postrun_leaves_a_kept_instance_alone(poweroff, requests_mock):
+    _release_api(requests_mock, "kept")
+
+    _postrun()
+
+    assert poweroff == []
+
+
+def test_postrun_powers_off_when_the_release_fails(poweroff, requests_mock):
+    _release_api(requests_mock, "failed")
+
+    _postrun()
+
+    assert poweroff == ["poweroff"]
+
+
+def test_postrun_powers_off_when_the_api_is_unreachable(poweroff, requests_mock):
+    requests_mock.post(f"{API_URL}{RELEASE_PATH}", status_code=503)
+
+    _postrun()
+
+    assert poweroff == ["poweroff"]
+
+
+def test_postrun_powers_off_on_a_malformed_task(poweroff, requests_mock):
+    """No kwargs to build an API client from: still never leak the instance."""
+    sender = types.SimpleNamespace(name=constants.RUN_BUILD_TASK_NAME)
 
     tasks._on_run_build_postrun(sender, kwargs={})
 
-    assert postrun == []
+    assert poweroff == ["poweroff"]
+
+
+def test_postrun_keeps_a_debugging_instance_when_the_release_fails(poweroff, requests_mock):
+    _release_api(requests_mock, "failed")
+
+    _postrun(no_self_terminate=True)
+
+    assert poweroff == []
+
+
+def test_postrun_ignores_other_tasks(poweroff, requests_mock):
+    """Only run_build owns the instance; nothing else may touch it."""
+    _postrun(sender_name="some.other.task")
+
+    assert requests_for(requests_mock, "POST", RELEASE_PATH) == []
+    assert poweroff == []
 
 
 # ---------------------------------------------------------------------------
 # Uploaded builds (direct artifact upload)
 #
 # The user uploaded a ZIP of already-built docs, so there is no repository to
-# reach: the worker must not sparse-clone, must not sync versions, and must not
-# require a config file. It still resolves resources and injects the container
-# environment the same way.
+# reach: the worker must not sync versions. It still resolves resources.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def prepare_uploaded_build(monkeypatch, api_client, mock_api):
-    """Run ``_prepare_build`` for an uploaded build, spying on the clone."""
-    calls = {"clone": 0, "sync_versions": 0}
+    """Run ``_prepare_build`` for an uploaded build, spying on the version sync."""
+    calls = {"sync_versions": 0}
 
     def _prepare(project=None):
         mock_api(project=project, build={"is_uploaded": True})
 
-        def fake_clone(**kwargs):
-            calls["clone"] += 1
-            raise AssertionError("uploaded builds must not sparse-clone")
-
         def fake_sync(**kwargs):
             calls["sync_versions"] += 1
 
-        monkeypatch.setattr(tasks, "sparse_clone_yaml", fake_clone)
         monkeypatch.setattr(tasks, "_sync_versions", fake_sync)
 
         build, version = tasks._fetch_build(api_client, 42)
@@ -420,10 +448,6 @@ def prepare_uploaded_build(monkeypatch, api_client, mock_api):
     return _prepare
 
 
-def test_prepare_build_skips_the_clone_for_uploaded_builds(prepare_uploaded_build):
-    _, calls = prepare_uploaded_build()
-
-    assert calls["clone"] == 0
 
 
 def test_prepare_build_skips_syncing_versions_for_uploaded_builds(prepare_uploaded_build):
@@ -433,31 +457,15 @@ def test_prepare_build_skips_syncing_versions_for_uploaded_builds(prepare_upload
     assert calls["sync_versions"] == 0
 
 
-def test_prepare_build_does_not_require_a_config_file_for_uploaded_builds(
-    prepare_uploaded_build,
-):
-    # A regular build with no ``.readthedocs.yaml`` fails; an uploaded one has
-    # nothing to read a config from and must still go through.
-    (build_os, _, _), _ = prepare_uploaded_build()
-
-    assert build_os
 
 
-def test_prepare_build_uses_the_latest_lts_image_for_uploaded_builds(
-    prepare_uploaded_build,
-):
-    # ``build.os`` is unknowable without the config file; the container only
-    # needs ``unzip``, so any current image works.
-    (build_os, _, _), _ = prepare_uploaded_build()
-
-    assert build_os == constants.UPLOADED_BUILD_OS
 
 
 
 def test_prepare_build_resolves_the_project_resources_for_uploaded_builds(
     prepare_uploaded_build,
 ):
-    (_, memory, time_limit), _ = prepare_uploaded_build(
+    (memory, time_limit), _ = prepare_uploaded_build(
         project={"container_mem_limit": "2g", "container_time_limit": 600}
     )
 
@@ -468,7 +476,7 @@ def test_prepare_build_resolves_the_project_resources_for_uploaded_builds(
 def test_prepare_build_falls_back_to_default_resources_for_uploaded_builds(
     prepare_uploaded_build,
 ):
-    (_, memory, time_limit), _ = prepare_uploaded_build()
+    (memory, time_limit), _ = prepare_uploaded_build()
 
     assert memory == constants.BUILD_MEMORY_LIMIT
     assert time_limit == constants.BUILD_TIME_LIMIT

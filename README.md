@@ -3,36 +3,38 @@
 A standalone Python runner that builds Read the Docs documentation end-to-end
 — clone, install dependencies, run Sphinx / MkDocs, upload artifacts to S3,
 report build state and notifications back to the RTD API — **without
-depending on Django or the host-side `docker exec` orchestration**.
+depending on Django**.
 
-The goal is to isolate the entire build process into one self-contained
-script that runs inside a Read the Docs build container (`readthedocs/build` image).
-The production orchestration layer is the ``worker/`` package, which runs on an ASG
-of ephemeral EC2 instances built from a Packer-baked AMI.
+Like the builder in `readthedocs.org`, the runner executes on the host and runs
+every build command inside a Read the Docs build container (`readthedocs/build`
+image) with `docker exec`. It runs in-process in the ``worker/`` Celery task, on
+an ASG of ephemeral EC2 instances built from a Packer-baked AMI.
 
 ## Packages
 
-A uv workspace with three members:
+A uv workspace with two members, both running on the host (an EC2 instance,
+one per build):
 
-| Package | Runs | Responsibility |
-|---|---|---|
-| `builder/` | inside the build container | The runner: clone, install tools and dependencies, build the docs, upload the artifacts, report state back to the API. Most of the code lives here. |
-| `worker/` | on the host (an EC2 instance, one per build) | A single Celery task. Takes a build off the `build:isolated` queue, reads `build.os` out of `.readthedocs.yaml`, starts the container, then terminates the instance. |
-| `shared/` | both | `readthedocsext.builds`: the API v2 client and the `build.os` / `build.tools` tables. |
+| Package | Responsibility |
+|---|---|
+| `builder/` | The runner: clone, install tools and dependencies, build the docs, upload the artifacts, report state back to the API. Each command runs in the build container with `docker exec`. Most of the code lives here. |
+| `worker/` | A single Celery task. Takes a build off the `build:isolated` queue, starts the build containers, runs the builder in-process, then terminates the instance. |
 
-`builder` and `worker` never import each other — the host orchestrates, the
-container builds. Only the container touches user code, which is why the worker
-keeps the AWS credentials and the broker to itself.
+The worker imports the builder; the builder never imports the worker. User code
+only runs inside the build container, which holds no credentials: the API key,
+the scoped storage credentials and the broker connection stay on the host.
 
 ## What it does
 
-Given an existing Build PK in the database via `--build-pk` argument, the runner:
+Given an existing Build PK from the worker, the runner:
 
 1. Fetches the build, version and project from the RTD API.
 2. Resets the build to clear prior commands / notifications from earlier attempts.
 3. Walks the build through state transitions (`cloning` → `installing` →
    `building` → `uploading` → `finished`) with `PATCH /api/v2/build/<id>/`.
-4. Clones the git repository and parses `.readthedocs.yaml`.
+4. Clones the git repository in a `readthedocs/build:ubuntu-lts-latest`
+   container, parses `.readthedocs.yaml`, and replaces that container with a
+   `readthedocs/build:<build.os>` one for the rest of the build.
 5. Installs `build.tools` versions via `asdf` — with an S3-cached tarball
    fast path when available.
 6. Sets up the language environment (`Virtualenv` / `UvEnv` / `Conda`).
@@ -49,8 +51,8 @@ The builder isn't invoked standalone — it runs as part of the Read the
 Docs dev environment, on the exact same code path as production. Local
 `docker-compose` dispatches every build to the `build:isolated` queue,
 where the `build-isolated` compose service (the dev emulator for the
-production AMI) picks it up, spawns a build container, and runs the
-runner (`builder/`) inside it.
+production AMI) picks it up, starts the build containers, and runs the
+runner (`builder/`), which `docker exec`s each command into them.
 
 ### Setup
 
@@ -69,7 +71,7 @@ Note the project needs `Feature.USE_BUILD_ISOLATED`.
 ```
 Runner — lifecycle (reset → state transitions → validate → upload → finalize → notify)
    └── BuildDirector — orchestration (VCS → environment → install → build)
-         ├── BuildEnvironment — subprocess, $VAR expansion, runuser drop
+         ├── DockerBuildEnvironment — docker exec into the build container
          ├── vcs.Backend       — git clone / fetch / checkout / submodules
          ├── PythonEnvironment — Virtualenv / UvEnv / Conda
          ├── backends.sphinx / .mkdocs — sphinx-build, mkdocs build, latexmk

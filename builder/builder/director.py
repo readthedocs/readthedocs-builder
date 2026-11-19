@@ -11,14 +11,15 @@ minus Celery.
 
 import datetime
 import os
-import pwd
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 import structlog
 
+from builder import binaries
 from builder import settings
 from builder.api_client import get_project_ssh_key
 from builder.api_models import APIProject
@@ -31,9 +32,10 @@ from builder.constants import EXTERNAL
 from builder.constants import GENERIC
 from builder.constants import MESSAGE_PROJECT_SSH_KEY_WITH_WRITE_ACCESS
 from builder.environments import DockerBuildEnvironment
+from builder.exceptions import BuildAppError
+from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
 from builder.exceptions import RepositoryError
-from builder.filesystem import assert_path_is_inside_docroot
 from builder.filesystem import safe_open
 from builder.loader import get_builder_class
 from builder.python_envs import Conda
@@ -45,21 +47,6 @@ from builder.utils import get_dotted_attribute
 
 
 log = structlog.get_logger(__name__)
-
-
-def _build_user_ids() -> tuple[int, int]:
-    """
-    The uid/gid the build container runs commands as.
-
-    Resolved by name when that user exists in this process's passwd db
-    (production), falling back to the configured ids when it doesn't (the dev
-    compose service).
-    """
-    try:
-        entry = pwd.getpwnam(settings.RTD_DOCKER_USER)
-    except KeyError:
-        return settings.RTD_DOCKER_UID, settings.RTD_DOCKER_GID
-    return entry.pw_uid, entry.pw_gid
 
 
 @dataclass
@@ -86,6 +73,9 @@ class TaskData:
     # substitute the local ``BuildEnvironment``.
     environment_class: type = DockerBuildEnvironment
     container_name: str | None = None
+    # Replaces the clone container with one for ``build.os`` and returns its
+    # name. The worker owns the container lifecycle, so it hands us this.
+    start_build_container: Callable[[str], str] | None = None
     # The worker's Docker client, shared so a build opens one connection.
     docker_client: Any = None
     build_director: "BuildDirector | None" = None
@@ -122,11 +112,11 @@ class BuildDirector:
         4. Read the config file, fail on legacy/invalid forms.
         5. Update submodules per the config.
         """
-        # Create the checkout dir through the build environment so it's wrapped
-        # in ``runuser`` and owned by the build user.
+        # Create the checkout dir through the build environment so it's created
+        # inside the container and owned by the build user.
         if not os.path.exists(self.data.project.doc_path):
             self.vcs_environment.run(
-                "mkdir",
+                binaries.MKDIR,
                 "--parents",
                 self.data.project.doc_path,
                 cwd="/",
@@ -146,7 +136,7 @@ class BuildDirector:
         )
 
         # Load the SSH deploy key into an agent before cloning a private repo.
-        self.setup_ssh_agent()
+        self.setup_ssh_agent(self.vcs_environment)
 
         # We can't run a ``pre_checkout`` job here because the config file
         # isn't loaded yet (the repo isn't cloned). See
@@ -189,6 +179,27 @@ class BuildDirector:
             allow_private_repos=self.data.allow_private_repos,
         )
 
+    def switch_to_build_container(self):
+        """
+        Replace the clone container with one running the config's ``build.os``.
+
+        The repository is cloned in a fixed image because ``build.os`` is only
+        known after reading ``.readthedocs.yaml`` from the clone.
+        """
+        if not self.data.start_build_container:
+            return
+
+        try:
+            self.data.container_name = self.data.start_build_container(self.data.config.build.os)
+        except BuildCancelled:
+            raise
+        except Exception as exc:
+            raise BuildAppError(BuildAppError.GENERIC_WITH_BUILD_ID) from exc
+
+        # The ssh-agent died with the clone container; ``create_build_environment``
+        # starts a new one in the build container.
+        self.ssh_agent_env = {}
+
     def create_build_environment(self):
         """Build the post-config :class:`BuildEnvironment` for build commands."""
         if self.data.build.get("is_uploaded"):
@@ -209,6 +220,9 @@ class BuildDirector:
             docker_client=self.data.docker_client,
             allow_private_repos=self.data.allow_private_repos,
         )
+
+        if not self.data.build.get("is_uploaded"):
+            self.setup_ssh_agent(self.build_environment)
 
     def setup_environment(self):
         """
@@ -330,7 +344,7 @@ class BuildDirector:
         # can confirm what we're using.
         if final_config_file:
             self.vcs_environment.run(
-                "cat",
+                binaries.CAT,
                 final_config_file.replace(checkout_path + "/", ""),
                 cwd=checkout_path,
             )
@@ -367,7 +381,7 @@ class BuildDirector:
         packages = self.data.config.build.apt_packages
         if packages:
             self.build_environment.run(
-                "apt-get",
+                binaries.APT_GET,
                 "update",
                 "--assume-yes",
                 "--quiet",
@@ -376,7 +390,7 @@ class BuildDirector:
             # ``--`` ends option parsing so package names that look like
             # options can't sneak through.
             self.build_environment.run(
-                "apt-get",
+                binaries.APT_GET,
                 "install",
                 "--assume-yes",
                 "--quiet",
@@ -473,8 +487,8 @@ class BuildDirector:
 
         User commands are intentionally not escaped, are run from the
         repository checkout, and inherit the same env vars as built-in
-        commands. The ``runuser`` privilege drop in BuildEnvironment keeps
-        them out of root.
+        commands. They run in the build container as ``RTD_DOCKER_USER``,
+        not root.
         """
         commands = get_dotted_attribute(self.data.config, f"build.jobs.{job}", None)
         if not commands:
@@ -498,7 +512,7 @@ class BuildDirector:
         soon-to-be-broken build.
         """
         command = self.build_environment.run(
-            "test",
+            binaries.TEST,
             "-x",
             "_build/html",
             cwd=self.data.project.checkout_path(self.data.version.slug),
@@ -611,7 +625,7 @@ class BuildDirector:
                 # tree is root-owned. Hand it to the build user before the
                 # docs-user ``mv`` (and later asdf/pip writes) can touch it.
                 self.build_environment.run(
-                    "chown",
+                    binaries.CHOWN,
                     "--recursive",
                     f"{settings.RTD_DOCKER_USER}:{settings.RTD_DOCKER_USER}",
                     extract_path,
@@ -622,7 +636,7 @@ class BuildDirector:
                 # Move the extracted ``<full_version>`` directory into asdf's
                 # canonical install location.
                 cmd = [
-                    "mv",
+                    binaries.MV,
                     f"{extract_path}/{full_version}",
                     os.path.join(
                         settings.RTD_DOCKER_WORKDIR,
@@ -712,16 +726,16 @@ class BuildDirector:
         if self.data.allow_private_repos:
             env.update({"GIT_SSH_COMMAND": GIT_SSH_COMMAND})
 
-    def setup_ssh_agent(self):
+    def setup_ssh_agent(self, environment):
         """
         Load the project's SSH deploy key into an ssh-agent for private clones.
 
-        Fetch the private key from the API, write it to a
-        locked-down file *inside the docroot*, start an ssh-agent and
-        ``ssh-add`` through the VCS environment (so the agent lives in the
-        build container, where every git command runs), and inject
-        ``SSH_AUTH_SOCK``/``SSH_AGENT_PID`` so both VCS and build commands can
-        authenticate for the whole build.
+        Fetch the private key from the API, start an ssh-agent and ``ssh-add``
+        through ``environment`` (so the agent lives in that environment's
+        container), and inject ``SSH_AUTH_SOCK``/``SSH_AGENT_PID`` so its
+        commands can authenticate. It runs for both the VCS (clone) environment
+        and the build environment. The key never touches disk:
+        it is piped to ``ssh-add`` from an environment variable.
 
         No-op for public/HTTPS repos, or when private repos aren't allowed.
         """
@@ -737,70 +751,34 @@ class BuildDirector:
             log.warning("SSH repository has no deploy key; skipping ssh-agent setup.")
             return
 
-        key_path = self._write_ssh_key(private_key)
-        try:
-            agent = self.vcs_environment.run("ssh-agent", "-s", record=False)
-            agent_env = parse_ssh_agent_env(agent.output)
-            if not agent_env.get("SSH_AUTH_SOCK"):
-                log.warning("ssh-agent did not report SSH_AUTH_SOCK.", output=agent.output)
-                return
+        agent = environment.run(binaries.CONTAINER_SSH_AGENT, "-s", record=False)
+        agent_env = parse_ssh_agent_env(agent.output)
+        if not agent_env.get("SSH_AUTH_SOCK"):
+            log.warning("ssh-agent did not report SSH_AUTH_SOCK.", output=agent.output)
+            return
 
-            self.ssh_agent_env = {
-                name: agent_env[name]
-                for name in ("SSH_AUTH_SOCK", "SSH_AGENT_PID")
-                if name in agent_env
-            }
-            # Make the agent reachable by the VCS commands about to run; build
-            # commands pick it up later via ``get_build_env_vars``.
-            self.vcs_environment._environment.update(self.ssh_agent_env)
+        self.ssh_agent_env = {
+            name: agent_env[name]
+            for name in ("SSH_AUTH_SOCK", "SSH_AGENT_PID")
+            if name in agent_env
+        }
+        # Make the agent reachable by the commands about to run.
+        environment._environment.update(self.ssh_agent_env)
 
-            # ``-t <ttl>``: expire the identity as a backstop if teardown is
-            # missed. The TTL outlasts the build's time limit so it never
-            # expires mid-build.
-            self.vcs_environment.run(
-                "ssh-add", "-t", str(self._ssh_key_ttl()), key_path, record=False
-            )
-        finally:
-            # The agent holds the key now; the file is no longer needed.
-            os.unlink(key_path)
-
-    def _write_ssh_key(self, private_key: str) -> str:
-        """
-        Write the private key where BOTH sides can reach it.
-
-        ``ssh-add`` runs inside the build container, but the runner writes the
-        file here on the host — so it has to land under the docroot, which is
-        bind-mounted into the container at the same path.
-        """
-        key_dir = Path(self.data.project.doc_path) / "checkouts"
-        assert_path_is_inside_docroot(key_dir)
-        self.vcs_environment.run(
-            "mkdir",
-            "--parents",
-            str(key_dir),
-            cwd="/",
+        # SECURITY: full path to ``ssh-add`` so a binary in a user-controlled
+        # PATH entry can't be picked up (GHSA-hgqj-8p83-33rf); ``printf`` is a
+        # shell built-in. The key is passed through an environment variable
+        # rather than written to disk (GHSA-25r3-xvp9-h3vj), and ``extra_env``
+        # keeps it out of the build logs.
+        # ``-t <ttl>``: expire the identity as a backstop if teardown is
+        # missed. The TTL outlasts the build's time limit so it never
+        # expires mid-build.
+        environment.run(
+            f'printf "%s\\n" "$READTHEDOCS_PRIVATE_SSH_KEY" | {binaries.CONTAINER_SSH_ADD} -t {self._ssh_key_ttl()} -',
+            extra_env={"READTHEDOCS_PRIVATE_SSH_KEY": private_key},
+            escape_command=False,
             record=False,
-            # The checkout goes in here next.
-            warn_only=False,
         )
-
-        key_path = key_dir / f"{self.data.version.slug}-key"
-        assert_path_is_inside_docroot(key_path)
-
-        # Create it 0600 from the start: never let the key exist group- or
-        # world-readable, even briefly, on a path the build container can see.
-        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as key_file:
-            key_file.write(private_key)
-        os.chmod(key_path, 0o400)
-
-        uid, gid = _build_user_ids()
-        try:
-            os.chown(key_path, uid, gid)
-        except OSError:
-            # Already ours (production, where the runner *is* the build user).
-            log.debug("Could not chown SSH key to the build user.", uid=uid, gid=gid)
-        return str(key_path)
 
     def _ssh_key_ttl(self) -> int:
         """TTL (seconds) for the loaded identity — outlasts the build limit."""
@@ -908,7 +886,7 @@ class BuildDirector:
         self._add_git_ssh_command_env_var(env)
 
         # Keep the deploy-key agent available to build commands too (e.g. user
-        # jobs that fetch git submodules), matching the old whole-build behavior.
+        # jobs that fetch git submodules), matching the legacy builder.
         env.update(self.ssh_agent_env)
 
         # Project-level env vars; private values are stripped on PR builds.
@@ -998,7 +976,7 @@ class BuildDirector:
             Path(self.data.project.checkout_path(self.data.version.slug)) / "artifacts.zip"
         )
         self.build_environment.run(
-            "mkdir",
+            binaries.MKDIR,
             "-p",
             str(destination.parent),
             record=False,
@@ -1023,13 +1001,13 @@ class BuildDirector:
 
         log.info("Extracting build artifacts.")
         self.build_environment.run(
-            "mkdir",
+            binaries.MKDIR,
             "-p",
             destination,
             record=False,
         )
         result = self.build_environment.run(
-            "unzip",
+            binaries.UNZIP,
             source,
             "-d",
             destination,

@@ -28,12 +28,14 @@ import tarfile
 from enum import StrEnum
 from enum import auto
 from functools import cached_property
+from pathlib import Path
 
 import boto3
 import botocore.config
 import botocore.exceptions
 import structlog
 
+from builder import settings
 from builder.exceptions import BuildAppError
 from builder.rclone import RCloneS3Remote
 from builder.rclone import SuspiciousFileOperation
@@ -205,21 +207,35 @@ class BuildMediaStorage(_S3StorageBase):
             provider="Other" if self._endpoint_url else "AWS",
         )
 
+    def _check_suspicious_path(self, path):
+        """
+        Check that the given path isn't a symlink or outside the doc root.
+
+        Ported from ``readthedocs.storage.mixins.RTDBaseStorage``.
+        """
+        path = Path(path)
+        resolved_path = path.resolve()
+        if path.is_symlink():
+            msg = "Suspicious operation over a symbolic link."
+            log.error(msg, path=str(path), resolved_path=str(resolved_path))
+            raise SuspiciousFileOperation(msg)
+
+        docroot = Path(settings.DOCROOT).resolve()
+        if not resolved_path.is_relative_to(docroot):
+            msg = "Suspicious operation outside the docroot directory."
+            log.error(msg, path=str(path), resolved_path=str(resolved_path))
+            raise SuspiciousFileOperation(msg)
+
     def rclone_sync_directory(self, source, destination):
         """
         Sync a directory recursively to storage using rclone sync.
 
-        Ported from ``readthedocs.storage.mixins.RTDBaseStorage``. Upstream's
-        ``_check_suspicious_path`` (symlink + docroot containment) is dropped:
-        it guards against a *shared* builder host where one project's build
-        could reach another's checkout. Here every build gets its own container
-        and its own STS credentials scoped to its own prefix, so the docroot
-        check has nothing left to protect. The empty-destination guard is kept —
-        it's cheap and catches a caller bug that would wipe the bucket.
+        Ported from ``readthedocs.storage.mixins.RTDBaseStorage``.
         """
         if destination in ("", "/"):
             raise SuspiciousFileOperation("Syncing all storage cannot be right")
 
+        self._check_suspicious_path(source)
         return self._rclone.sync(source, destination)
 
     def delete_directory(self, remote_prefix: str):

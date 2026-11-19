@@ -1,8 +1,7 @@
 """
 Remote ``git fetch`` refspec for a version.
 
-Shared by the runner (``builder/``) and the worker's bootstrap sparse-clone
-(``worker/``) so both fetch the *same* ref. This matters most for tags and
+Used by the runner's clone. This matters most for tags and
 external (PR/MR) versions, whose ``identifier`` is a commit hash rather than a
 name — ``git clone -b <hash>`` fails, so the ref has to be fetched explicitly.
 
@@ -10,6 +9,8 @@ Ported from readthedocs.org
 ``readthedocs/vcs_support/backends/git.py:get_remote_fetch_refspec`` to keep the
 two implementations from diverging.
 """
+
+import re
 
 import structlog
 
@@ -25,6 +26,8 @@ STABLE = "stable"
 # PR/MR fetch patterns. Mirror readthedocs.org ``projects/constants.py``.
 GITHUB_PR_PULL_PATTERN = "pull/{id}/head:external-{id}"
 GITLAB_MR_PULL_PATTERN = "merge-requests/{id}/head:external-{id}"
+GITHUB_PR_COMMIT_PATTERN = "{sha}:external-{id}"
+COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def get_remote_fetch_refspec(
@@ -74,6 +77,10 @@ def get_remote_fetch_refspec(
 
     if version_type == EXTERNAL:
         if is_github:
+            # GitHub serves the PR's commit by SHA before it creates
+            # ``refs/pull/<id>/head``, so fetching the SHA avoids racing it.
+            if identifier and COMMIT_SHA_RE.fullmatch(identifier):
+                return GITHUB_PR_COMMIT_PATTERN.format(sha=identifier, id=verbose_name)
             return GITHUB_PR_PULL_PATTERN.format(id=verbose_name)
         if is_gitlab:
             return GITLAB_MR_PULL_PATTERN.format(id=verbose_name)

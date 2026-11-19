@@ -23,6 +23,7 @@ from slumber.exceptions import HttpNotFoundError
 
 from builder.api_models import APIProject
 from builder.constants import RTD_SKIP_BUILD_EXIT_CODE
+from builder import binaries
 from builder.environments import BuildCommand
 from builder.environments import BuildEnvironment
 from builder.environments import DockerBuildCommand
@@ -96,22 +97,26 @@ def make_docker_command(command, **kwargs):
 
 def test_wrapped_command_runs_through_a_shell_under_nice():
     cmd = make_docker_command(("echo", "hi"))
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'echo hi'"
+    assert cmd.get_wrapped_command() == "/usr/bin/nice -n 10 /bin/sh -c 'echo hi'"
 
 
 def test_wrapped_command_prepends_bin_path_to_the_container_path():
     cmd = make_docker_command(("python", "-V"), bin_path="/venv/bin")
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'PATH=/venv/bin:$PATH ; python -V'"
+    assert cmd.get_wrapped_command() == (
+        "/usr/bin/nice -n 10 /bin/sh -c 'PATH=/venv/bin:$PATH ; python -V'"
+    )
 
 
 def test_wrapped_command_escapes_shell_metacharacters():
     cmd = make_docker_command(("pip", "install", "requests<0.8"))
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'pip install requests\\<0.8'"
+    assert cmd.get_wrapped_command() == (
+        "/usr/bin/nice -n 10 /bin/sh -c 'pip install requests\\<0.8'"
+    )
 
 
 def test_wrapped_command_leaves_user_commands_unescaped():
     cmd = make_docker_command(("cat foo.txt | grep bar",), escape_command=False)
-    assert cmd.get_wrapped_command() == "nice -n 10 /bin/sh -c 'cat foo.txt | grep bar'"
+    assert cmd.get_wrapped_command() == "/usr/bin/nice -n 10 /bin/sh -c 'cat foo.txt | grep bar'"
 
 
 @pytest.mark.parametrize(
@@ -153,7 +158,7 @@ def test_docker_command_execs_into_the_container():
     assert kwargs["container"] == "build-1"
     assert kwargs["user"] == "docs"
     assert kwargs["workdir"] == "/tmp"
-    assert kwargs["cmd"] == "nice -n 10 /bin/sh -c 'echo hi'"
+    assert kwargs["cmd"] == "/usr/bin/nice -n 10 /bin/sh -c 'echo hi'"
     assert cmd.output == "output"
     assert cmd.exit_code == 0
 
@@ -203,6 +208,11 @@ def test_command_stores_environment():
     cmd = BuildCommand(["echo"], environment=env)
     assert cmd._environment["FOOBAR"] == "foobar"
     assert cmd._environment["BIN_PATH"] == "foobar"
+
+
+def test_command_merges_extra_env_into_the_environment():
+    cmd = BuildCommand(["echo"], environment={"FOOBAR": "foobar"}, extra_env={"SECRET": "s3cret"})
+    assert cmd._environment == {"FOOBAR": "foobar", "SECRET": "s3cret"}
 
 
 def test_command_rejects_a_path_in_the_environment():
@@ -368,6 +378,53 @@ def test_sanitize_output_obfuscates_private_env_vars():
     # Public values are left alone; private ones keep only their first 4 chars.
     assert cmd.sanitize_output("public-value") == "public-value"
     assert cmd.sanitize_output("private-value") == "priv****"
+
+
+def test_sanitize_output_obfuscates_extra_env_values():
+    """``extra_env`` carries secrets (the SSH deploy key), so its values are masked too."""
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], extra_env={"KEY": "private-value", "EMPTY": ""})
+    assert cmd.sanitize_output("leaked private-value here") == "leaked priv**** here"
+
+
+def test_sanitize_output_obfuscates_before_truncating():
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], extra_env={"KEY": "private-value"})
+    sanitized = cmd.sanitize_output("private-value" + "x" * 3_000_000)
+    assert "private-value" not in sanitized
+
+
+def test_failed_command_log_obfuscates_extra_env():
+    env = make_env()
+    with mock.patch("builder.environments.log") as log:
+        env.run("/bin/sh", "-c", "echo $TOKEN; exit 1", record=False, extra_env={"TOKEN": "secret-token"}, cwd="/tmp")
+    log.warning.assert_called_once()
+    assert log.warning.call_args.kwargs["output"] == "secr****\n"
+    assert "secret-token" not in str(log.mock_calls)
+
+
+def test_extra_env_does_not_persist_in_the_environment():
+    env = make_env(environment={"FOO": "foo"})
+    cmd = env.run("true", record=False, extra_env={"BAR": "bar"}, cwd="/tmp")
+    second = env.run("true", record=False, cwd="/tmp")
+    assert cmd._environment == {"FOO": "foo", "BAR": "bar"}
+    assert second._environment == {"FOO": "foo"}
+    assert env._environment == {"FOO": "foo"}
+
+
+def test_sanitize_output_obfuscates_clone_token():
+    project = APIProject(slug="test-project", clone_token="x-access-token:1234")
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], build_env=make_env(project=project))
+    # Both the remote-URL form and the bare secret are masked.
+    assert (
+        cmd.sanitize_output("https://x-access-token:1234@github.com/org/repo")
+        == "https://****@github.com/org/repo"
+    )
+    assert cmd.sanitize_output("the token is 1234") == "the token is ****"
+    assert cmd.sanitize_output("no token here") == "no token here"
+
+
+def test_sanitize_output_without_clone_token():
+    cmd = BuildCommand(["/bin/bash", "-c", "echo"], build_env=make_env())
+    assert cmd.sanitize_output("nothing to mask") == "nothing to mask"
 
 
 # ---------------------------------------------------------------------------
@@ -574,8 +631,9 @@ def test_every_variable_our_commands_use_survives_escaping():
             referenced.add(name)
 
     # ``PATH`` is prepended by ``get_wrapped_command`` itself, not escaped
-    # here; NAME/VAR are placeholders in docstrings.
-    referenced -= {"PATH", "NAME", "VAR"}
+    # here; NAME/VAR are placeholders in docstrings. The SSH key is only
+    # referenced from an ``escape_command=False`` shell expression.
+    referenced -= {"PATH", "NAME", "VAR", "READTHEDOCS_PRIVATE_SSH_KEY"}
 
     for variable in referenced:
         command = DockerBuildCommand((f"${variable}",), build_env=make_docker_env())
@@ -584,3 +642,38 @@ def test_every_variable_our_commands_use_survives_escaping():
             f"${variable} is used in a command but missing from "
             "DockerBuildCommand._escape_command's allowlist"
         )
+
+
+def test_super_user_exec_gets_a_system_only_path():
+    build_env = make_docker_env(environment={"BIN_PATH": "/home/docs/venv/bin"})
+    client = mock.Mock()
+    client.exec_create.return_value = {"Id": "exec-id"}
+    client.exec_start.return_value = b""
+    client.exec_inspect.return_value = {"ExitCode": 0}
+    build_env.client = client
+
+    build_env.run("apt-get", "update", user="root", record=False)
+
+    _, kwargs = client.exec_create.call_args
+    assert kwargs["user"] == "root"
+    assert kwargs["environment"]["PATH"] == binaries.SUPER_USER_PATH
+    assert "/home/docs" not in kwargs["environment"]["PATH"]
+    # No user-writable ``bin_path`` prepended for root either.
+    assert kwargs["cmd"] == "/usr/bin/nice -n 10 /bin/sh -c 'apt-get update'"
+
+
+def test_docs_user_exec_keeps_the_container_path():
+    build_env = make_docker_env(environment={"BIN_PATH": "/home/docs/venv/bin"})
+    client = mock.Mock()
+    client.exec_create.return_value = {"Id": "exec-id"}
+    client.exec_start.return_value = b""
+    client.exec_inspect.return_value = {"ExitCode": 0}
+    build_env.client = client
+
+    build_env.run("python", "-V", record=False)
+
+    _, kwargs = client.exec_create.call_args
+    assert "PATH" not in kwargs["environment"]
+    assert kwargs["cmd"] == (
+        "/usr/bin/nice -n 10 /bin/sh -c 'PATH=/home/docs/venv/bin:$PATH ; python -V'"
+    )

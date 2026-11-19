@@ -10,9 +10,9 @@ build container via ``docker exec``, the same way upstream's
 the worker; this module only execs into it by name, which it reads from
 ``build_env.container_name``.
 
-Privilege drop is ``docker exec --user`` — there is no ``runuser``
-wrapping, and no user database lookup, because the user is resolved by
-Docker inside the container rather than by us on the host.
+Each command runs as the user passed to ``docker exec --user``, which
+Docker resolves inside the container, so there's no user database lookup on
+the host.
 
 :class:`BuildEnvironment` / :class:`BuildCommand` run commands as plain
 subprocesses and exist **for tests only** — see the warning on that class.
@@ -28,6 +28,7 @@ import structlog
 from docker.errors import APIError as DockerAPIError
 from slumber.exceptions import HttpNotFoundError
 
+from builder import binaries
 from builder import settings
 from builder.constants import DATA_UPLOAD_MAX_OUTPUT_BYTES
 from builder.constants import RTD_SKIP_BUILD_EXIT_CODE
@@ -139,6 +140,8 @@ class BuildCommand(BuildCommandResultMixin):
         container's shell unescaped (used for user-supplied ``build.jobs`` and
         ``build.commands``, which are meant to be shell expressions).
         Defaults to ``True``.
+    :param extra_env: env vars for this command only. Their values are
+        treated as secrets and obfuscated in the recorded output.
     """
 
     def __init__(
@@ -152,6 +155,7 @@ class BuildCommand(BuildCommandResultMixin):
         record_as_success=False,
         demux=False,
         escape_command=True,
+        extra_env=None,
         **kwargs,
     ):
         self.id = None
@@ -167,6 +171,8 @@ class BuildCommand(BuildCommandResultMixin):
         self.cwd = cwd or settings.RTD_DOCKER_WORKDIR
         self.user = user or settings.RTD_DOCKER_USER
         self._environment = environment.copy() if environment else {}
+        self._extra_env = extra_env.copy() if extra_env else {}
+        self._environment.update(self._extra_env)
         if "PATH" in self._environment:
             raise BuildAppError(
                 BuildAppError.GENERIC_WITH_BUILD_ID,
@@ -200,6 +206,10 @@ class BuildCommand(BuildCommandResultMixin):
         if self.output is not None:
             output = self.output.encode("utf-8")
         return "\n".join([self.get_command(), str(output)])
+
+    @property
+    def is_super_user(self) -> bool:
+        return self.user == settings.RTD_DOCKER_SUPER_USER
 
     def get_command(self) -> str:
         """Flatten ``command`` to a single shell-safe display string."""
@@ -274,10 +284,12 @@ class BuildCommand(BuildCommandResultMixin):
         - Strips NUL bytes (PostgreSQL won't accept them in text columns).
         - Truncates to ``DATA_UPLOAD_MAX_OUTPUT_BYTES`` to fit a single API request.
         - Obfuscates values of private project environment variables.
+        - Obfuscates the Git clone token.
         """
-        sanitized = ""
+        # Obfuscate before truncating so a secret can't survive in the chunk we keep.
+        sanitized = self.obfuscate_output(output or "")
         try:
-            sanitized = output.replace("\x00", "")
+            sanitized = sanitized.replace("\x00", "")
         except TypeError, AttributeError:
             pass
 
@@ -293,16 +305,33 @@ class BuildCommand(BuildCommandResultMixin):
                 f"{truncated_output}"
             )
 
-        # Obfuscate private environment variable values.
+        return sanitized
+
+    def obfuscate_output(self, output: str) -> str:
+        """Mask private env var values, ``extra_env`` values and the clone token in ``output``."""
+        if not output:
+            return output
+
+        secrets = list(self._extra_env.values())
         if self.build_env and self.build_env.project:
             env_vars = getattr(self.build_env.project, "_environment_variables", {}) or {}
             for name, spec in env_vars.items():
                 if not spec.get("public"):
-                    value = spec["value"]
-                    obfuscated_value = f"{value[:4]}****"
-                    sanitized = sanitized.replace(value, obfuscated_value)
+                    secrets.append(spec["value"])
+        for value in secrets:
+            if value:
+                output = output.replace(value, f"{value[:4]}****")
 
-        return sanitized
+        if self.build_env and self.build_env.project:
+            clone_token = getattr(self.build_env.project, "clone_token", None)
+            if clone_token:
+                # The clone token has the ``<username>:<secret>`` format.
+                secret = clone_token.split(":", 1)[-1]
+                for value in (clone_token, secret):
+                    if value:
+                        output = output.replace(value, "****")
+
+        return output
 
     def save(self, api_client):
         """
@@ -389,7 +418,7 @@ class DockerBuildCommand(BuildCommand):
         other work, matching upstream.
         """
         prefix = ""
-        if self.bin_path:
+        if self.bin_path and not self.is_super_user:
             bin_path = self._escape_command(self.bin_path)
             prefix += f"PATH={bin_path}:$PATH "
 
@@ -397,7 +426,7 @@ class DockerBuildCommand(BuildCommand):
             self._escape_command(part) if self.escape_command else part for part in self.command
         )
 
-        nice = "nice -n 10"
+        nice = f"{binaries.NICE} -n 10"
         if prefix:
             # ``;`` separates the variable assignment from the command as
             # explicitly as a newline would.
@@ -419,7 +448,11 @@ class DockerBuildCommand(BuildCommand):
 
         # PATH is handled in ``get_wrapped_command`` (prepended to the
         # container's own), and HOME/USER come from the container's passwd
-        # entry via ``--user``. Neither is set here.
+        # entry via ``--user``. Super-user execs are the exception: they get
+        # a fixed system PATH instead of the image's user-writable one (see
+        # ``builder.binaries``).
+        if self.is_super_user:
+            environment["PATH"] = binaries.SUPER_USER_PATH
 
         container = self.build_env.container_name
         if not container:
@@ -600,8 +633,8 @@ class BuildEnvironment:
                 log.warning(
                     "Command failed",
                     command=build_cmd.get_command(),
-                    output=_truncate_output(build_cmd.output),
-                    stderr=_truncate_output(build_cmd.error),
+                    output=_truncate_output(build_cmd.obfuscate_output(build_cmd.output)),
+                    stderr=_truncate_output(build_cmd.obfuscate_output(build_cmd.error)),
                     exit_code=build_cmd.exit_code,
                     project_slug=self.project.slug if self.project else "",
                     version_slug=self.version.slug if self.version else "",
@@ -615,12 +648,12 @@ class BuildEnvironment:
                 # In production the API recording captures it for the build
                 # web UI, but with ``record=False`` (dev runs) the output
                 # would otherwise be lost entirely.
-                log.error(
+                log.warning(
                     "Build command failed",
                     command=build_cmd.get_command(),
                     exit_code=build_cmd.exit_code,
-                    output=_truncate_output(build_cmd.output),
-                    stderr=_truncate_output(build_cmd.error),
+                    output=_truncate_output(build_cmd.obfuscate_output(build_cmd.output)),
+                    stderr=_truncate_output(build_cmd.obfuscate_output(build_cmd.error)),
                 )
                 raise BuildUserError(BuildUserError.GENERIC)
         return build_cmd

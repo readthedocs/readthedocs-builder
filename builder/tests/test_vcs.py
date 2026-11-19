@@ -26,6 +26,7 @@ from conftest import git
 from conftest import make_backend
 from conftest import submodules_config
 
+from builder import binaries
 from builder.constants import ALL
 from builder.constants import BRANCH
 from builder.constants import EXTERNAL
@@ -236,27 +237,21 @@ def test_run_translates_a_failed_command_to_repository_error(git_repo, docroot):
         repo.environment, "run", side_effect=BuildCancelled(BuildCancelled.CANCELLED_BY_USER)
     ):
         with pytest.raises(BuildCancelled):
-            repo.run("git", "status")
+            repo.run(binaries.CONTAINER_GIT, "status")
 
 
 def test_clone_error_maps_to_public_repo_message(git_repo, docroot):
     repo = make_backend(git_repo, repo="/does/not/exist")
     with pytest.raises(RepositoryError) as excinfo:
         repo.update()
-    assert (
-        excinfo.value.message_id
-        == RepositoryError.CLONE_ERROR_WITH_PRIVATE_REPO_NOT_ALLOWED
-    )
+    assert excinfo.value.message_id == RepositoryError.CLONE_ERROR_WITH_PRIVATE_REPO_NOT_ALLOWED
 
 
 def test_clone_error_maps_to_private_repo_message(git_repo, docroot):
     repo = make_backend(git_repo, repo="/does/not/exist", allow_private_repos=True)
     with pytest.raises(RepositoryError) as excinfo:
         repo.update()
-    assert (
-        excinfo.value.message_id
-        == RepositoryError.CLONE_ERROR_WITH_PRIVATE_REPO_ALLOWED
-    )
+    assert excinfo.value.message_id == RepositoryError.CLONE_ERROR_WITH_PRIVATE_REPO_ALLOWED
 
 
 def test_make_clean_working_dir_recreates_an_empty_dir(git_repo, docroot):
@@ -275,13 +270,11 @@ def test_check_working_dir_creates_the_dir_via_a_wrapped_command(git_repo, docro
     repo = make_backend(git_repo)
     assert not exists(repo.working_dir)
 
-    with mock.patch.object(
-        repo.environment, "run", wraps=repo.environment.run
-    ) as run:
+    with mock.patch.object(repo.environment, "run", wraps=repo.environment.run) as run:
         repo.check_working_dir()
 
     assert exists(repo.working_dir)
-    assert run.call_args.args[0] == "mkdir"
+    assert run.call_args.args[0] == binaries.MKDIR
 
 
 def test_check_working_dir_is_a_noop_when_the_dir_exists(git_repo, docroot):
@@ -436,9 +429,7 @@ def test_get_available_submodules_honours_an_exclude_list(git_repo, docroot):
     repo.update()
     repo.checkout("submodule")
     # Excluding the only submodule leaves nothing to fetch.
-    valid, paths = repo.get_available_submodules(
-        submodules_config(include=[], exclude=["foobar"])
-    )
+    valid, paths = repo.get_available_submodules(submodules_config(include=[], exclude=["foobar"]))
     assert valid is False
     assert paths == []
 
@@ -521,19 +512,62 @@ def test_parse_submodules_handles_odd_entries(git_repo, docroot):
     ]
 
 
+def test_fetch_external_version_retries_until_the_ref_exists(git_repo, docroot):
+    repo = make_backend(git_repo, version_type=EXTERNAL, slug="9", verbose_name="9", identifier="9")
+    repo.update()
+
+    def create_ref(delay):
+        git(git_repo, "update-ref", "refs/pull/9/head", "master")
+
+    with (
+        mock.patch.object(repo, "get_remote_fetch_refspec", return_value="pull/9/head:external-9"),
+        mock.patch("builder.vcs.time.sleep", side_effect=create_ref) as sleep,
+    ):
+        code, _, _ = repo.fetch()
+
+    assert code == 0
+    assert sleep.call_count == 1
+
+
+def test_fetch_external_version_fails_when_the_ref_never_exists(git_repo, docroot):
+    repo = make_backend(git_repo, version_type=EXTERNAL, slug="9", verbose_name="9", identifier="9")
+    repo.update()
+
+    with (
+        mock.patch.object(repo, "get_remote_fetch_refspec", return_value="pull/9/head:external-9"),
+        mock.patch("builder.vcs.time.sleep") as sleep,
+        pytest.raises(RepositoryError),
+    ):
+        repo.fetch()
+
+    assert sleep.call_count == 2
+
+
+def test_fetch_external_github_version_by_commit_sha(git_repo, docroot):
+    # Like a new PR on GitHub: the commit exists upstream, but no ref points at it.
+    git(git_repo, "checkout", "-b", "pr", "master")
+    git(git_repo, "commit", "--allow-empty", "-m", "PR commit")
+    sha = current_commit(git_repo)
+    git(git_repo, "checkout", "master")
+    git(git_repo, "branch", "-D", "pr")
+    git(git_repo, "config", "uploadpack.allowAnySHA1InWant", "true")
+
+    repo = make_backend(git_repo, version_type=EXTERNAL, slug="9", verbose_name="9", identifier=sha)
+    with mock.patch.object(type(repo.project), "is_github_project", True):
+        repo.update()
+        repo.checkout(sha)
+
+    assert current_commit(repo.working_dir) == sha
+
+
 # ---------------------------------------------------------------------------
 # get_remote_fetch_refspec — pure logic, no git needed
 # ---------------------------------------------------------------------------
 
 
 def test_refspec_for_a_branch(git_repo, docroot):
-    repo = make_backend(
-        git_repo, version_type=BRANCH, slug="develop", verbose_name="develop"
-    )
-    assert (
-        repo.get_remote_fetch_refspec()
-        == "refs/heads/develop:refs/remotes/origin/develop"
-    )
+    repo = make_backend(git_repo, version_type=BRANCH, slug="develop", verbose_name="develop")
+    assert repo.get_remote_fetch_refspec() == "refs/heads/develop:refs/remotes/origin/develop"
 
 
 def test_refspec_for_a_tag(git_repo, docroot):
@@ -562,9 +596,7 @@ def test_refspec_for_a_machine_branch_uses_the_identifier(git_repo, docroot):
         identifier="main",
         machine=True,
     )
-    assert (
-        repo.get_remote_fetch_refspec() == "refs/heads/main:refs/remotes/origin/main"
-    )
+    assert repo.get_remote_fetch_refspec() == "refs/heads/main:refs/remotes/origin/main"
 
 
 def test_refspec_for_a_machine_branch_without_identifier_is_none(git_repo, docroot):
@@ -640,10 +672,7 @@ def test_clone_url_injects_the_token_when_present(git_repo, docroot):
         repo="https://github.com/readthedocs/test.git",
         clone_token="secret",
     )
-    assert (
-        repo.repo_url
-        == "https://$READTHEDOCS_GIT_CLONE_TOKEN@github.com/readthedocs/test.git"
-    )
+    assert repo.repo_url == "https://$READTHEDOCS_GIT_CLONE_TOKEN@github.com/readthedocs/test.git"
 
 
 def test_clone_url_leaves_ssh_urls_alone(git_repo, docroot):

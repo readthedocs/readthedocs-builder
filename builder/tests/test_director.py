@@ -9,14 +9,13 @@ client — and each decomposed method is asserted independently. See
 """
 
 import os
-import stat
 from pathlib import Path
 from unittest import mock
 
 import pytest
 from conftest import make_director
 
-from builder import settings
+from builder import binaries
 from builder.constants import GENERIC
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildUserError
@@ -75,29 +74,24 @@ def test_git_ssh_command_added_only_for_private_repos(docroot):
 # ---------------------------------------------------------------------------
 
 
-def _run_creating_dirs(director, output=""):
-    """
-    Make the mocked VCS environment carry out ``mkdir`` for real.
-
-    ``_write_ssh_key`` creates the key's directory *through the environment*,
-    so that it belongs to the build user rather than to whoever the runner is.
-    A mock that only records the call leaves nowhere to write the key.
-    """
-    result = mock.MagicMock()
-    result.output = output
-
-    def _run(*args, **kwargs):
-        if args and args[0] == "mkdir":
-            os.makedirs(args[-1], exist_ok=True)
-        return result
-
-    director.vcs_environment.run.side_effect = _run
-    return result
-
-
 def _calls_named(director, name):
     """Every recorded command whose first argument is ``name``."""
     return [c for c in director.vcs_environment.run.call_args_list if c.args and c.args[0] == name]
+
+
+def _ssh_add_call(director):
+    """The ``ssh-add`` shell expression, which carries the binary inside a single argument."""
+    (call,) = [
+        c for c in director.vcs_environment.run.call_args_list if binaries.CONTAINER_SSH_ADD in c.args[0]
+    ]
+    return call
+
+
+def _private_repo_director(key="PRIVATE-KEY-CONTENT"):
+    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
+    director.data.api_client.project.return_value.key.get.return_value = {"private_key": key}
+    director.vcs_environment.run.return_value.output = _agent_output()
+    return director
 
 
 def _agent_output():
@@ -110,14 +104,14 @@ def _agent_output():
 
 def test_setup_ssh_agent_noop_when_private_repos_disabled(docroot):
     director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"})
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
     assert director.ssh_agent_env == {}
     director.vcs_environment.run.assert_not_called()
 
 
 def test_setup_ssh_agent_noop_for_https_repo(docroot, monkeypatch):
     director = make_director(SPHINX, project={"repo": "https://github.com/rtd/public"}, allow_private_repos=True)
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
     assert director.ssh_agent_env == {}
     director.vcs_environment.run.assert_not_called()
 
@@ -125,20 +119,16 @@ def test_setup_ssh_agent_noop_for_https_repo(docroot, monkeypatch):
 def test_setup_ssh_agent_skips_when_project_has_no_key(docroot, monkeypatch):
     director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
     director.data.api_client.project.return_value.key.get.return_value = {"private_key": ""}
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
     assert director.ssh_agent_env == {}
     director.vcs_environment.run.assert_not_called()
 
 
 def test_setup_ssh_agent_loads_key_and_injects_env(docroot, monkeypatch):
     monkeypatch.setenv("RTD_BUILD_TIME_LIMIT_SECONDS", "900")
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    director.data.api_client.project.return_value.key.get.return_value = {
-        "private_key": "PRIVATE-KEY-CONTENT",
-    }
-    _run_creating_dirs(director, output=_agent_output())
+    director = _private_repo_director()
 
-    director.setup_ssh_agent()
+    director.setup_ssh_agent(director.vcs_environment)
 
     assert director.ssh_agent_env == {
         "SSH_AUTH_SOCK": "/tmp/ssh-xyz/agent.42",
@@ -148,72 +138,30 @@ def test_setup_ssh_agent_loads_key_and_injects_env(docroot, monkeypatch):
     director.vcs_environment._environment.update.assert_called_with(director.ssh_agent_env)
 
     # ssh-agent started, then the key added with a TTL that outlasts the limit.
-    assert _calls_named(director, "ssh-agent")[0].args == ("ssh-agent", "-s")
-    add_args = _calls_named(director, "ssh-add")[0].args
-    assert add_args[1] == "-t"
-    assert int(add_args[2]) > 900
+    assert _calls_named(director, binaries.CONTAINER_SSH_AGENT)[0].args == (binaries.CONTAINER_SSH_AGENT, "-s")
+    (ssh_add,) = _ssh_add_call(director).args
+    ttl = int(ssh_add.split(" -t ")[1].split()[0])
+    assert ttl > 900
 
 
-def test_ssh_key_is_written_inside_the_docroot(docroot, monkeypatch):
+def test_setup_ssh_agent_pipes_the_key_from_an_env_var(docroot):
     """
-    ``ssh-add`` runs inside the build container; the runner writes the key here.
+    The key never touches disk: ``printf`` pipes it into ``ssh-add -``.
 
-    The docroot is the only path mounted into the container, and it's mounted
-    at the same path on both sides — so a key written anywhere else (a host
-    temp file, say) simply doesn't exist for ``ssh-add``.
+    It travels as ``extra_env`` so it's masked from any recorded output, and
+    the command is a literal shell expression of ours, so it's safe to leave
+    unescaped.
     """
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    _run_creating_dirs(director)
+    director = _private_repo_director()
 
-    key_path = Path(director._write_ssh_key("PRIVATE-KEY-CONTENT"))
+    director.setup_ssh_agent(director.vcs_environment)
 
-    assert key_path.is_relative_to(Path(settings.DOCROOT))
-    assert key_path.read_text() == "PRIVATE-KEY-CONTENT"
-
-
-def test_ssh_key_is_never_readable_by_anyone_else(docroot, monkeypatch):
-    """It lands on a path the build container can see, so keep it 0400."""
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    _run_creating_dirs(director)
-
-    key_path = Path(director._write_ssh_key("PRIVATE-KEY-CONTENT"))
-
-    assert stat.S_IMODE(key_path.stat().st_mode) == 0o400
-
-
-def test_setup_ssh_agent_passes_the_docroot_path_to_ssh_add(docroot, monkeypatch):
-    """The path handed to ``ssh-add`` has to resolve inside the container."""
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    director.data.api_client.project.return_value.key.get.return_value = {
-        "private_key": "PRIVATE-KEY-CONTENT",
-    }
-    _run_creating_dirs(director, output=_agent_output())
-
-    director.setup_ssh_agent()
-
-    ssh_add_path = Path(_calls_named(director, "ssh-add")[0].args[3])
-    assert ssh_add_path.is_relative_to(Path(settings.DOCROOT))
-
-
-def test_setup_ssh_agent_deletes_the_key_file(docroot, monkeypatch):
-    director = make_director(SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True)
-    director.data.api_client.project.return_value.key.get.return_value = {
-        "private_key": "PRIVATE-KEY-CONTENT",
-    }
-    _run_creating_dirs(director, output=_agent_output())
-
-    written = []
-    real_write = director._write_ssh_key
-
-    def _spy(private_key):
-        path = real_write(private_key)
-        written.append(path)
-        return path
-
-    monkeypatch.setattr(director, "_write_ssh_key", _spy)
-    director.setup_ssh_agent()
-
-    assert written and not os.path.exists(written[0])
+    call = _ssh_add_call(director)
+    ttl = director._ssh_key_ttl()
+    assert call.args == (f'printf "%s\\n" "$READTHEDOCS_PRIVATE_SSH_KEY" | /usr/bin/ssh-add -t {ttl} -',)
+    assert call.kwargs["extra_env"] == {"READTHEDOCS_PRIVATE_SSH_KEY": "PRIVATE-KEY-CONTENT"}
+    assert call.kwargs["escape_command"] is False
+    assert call.kwargs["record"] is False
 
 
 def test_ssh_agent_env_flows_into_build_env_vars(docroot):
@@ -221,6 +169,57 @@ def test_ssh_agent_env_flows_into_build_env_vars(docroot):
     director.ssh_agent_env = {"SSH_AUTH_SOCK": "/tmp/ssh-xyz/agent.42"}
     env = director.get_build_env_vars()
     assert env["SSH_AUTH_SOCK"] == "/tmp/ssh-xyz/agent.42"
+
+
+def test_switch_to_build_container_starts_the_container_for_the_config_os(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = mock.Mock(return_value="build-42")
+
+    director.switch_to_build_container()
+
+    director.data.start_build_container.assert_called_once_with(director.data.config.build.os)
+    assert director.data.container_name == "build-42"
+
+
+def test_switch_to_build_container_drops_the_stale_ssh_agent(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = mock.Mock(return_value="build-42")
+    director.ssh_agent_env = {"SSH_AUTH_SOCK": "/tmp/ssh-xyz/agent.42"}
+
+    director.switch_to_build_container()
+
+    assert "SSH_AUTH_SOCK" not in director.get_build_env_vars()
+
+
+def test_create_build_environment_starts_an_ssh_agent_in_the_build_container(docroot):
+    director = _private_repo_director()
+    director.data.build = {}
+    build_env = mock.Mock()
+    build_env.run.return_value.output = _agent_output()
+    director.data.environment_class = mock.Mock(return_value=build_env)
+
+    director.create_build_environment()
+
+    assert director.ssh_agent_env["SSH_AUTH_SOCK"] == "/tmp/ssh-xyz/agent.42"
+    build_env._environment.update.assert_called_with(director.ssh_agent_env)
+
+
+def test_switch_to_build_container_noop_without_a_starter(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = None
+    director.data.container_name = "build-42"
+
+    director.switch_to_build_container()
+
+    assert director.data.container_name == "build-42"
+
+
+def test_switch_to_build_container_reports_a_start_failure_as_an_app_error(docroot):
+    director = make_director(SPHINX)
+    director.data.start_build_container = mock.Mock(side_effect=RuntimeError("docker down"))
+
+    with pytest.raises(BuildAppError):
+        director.switch_to_build_container()
 
 
 def test_build_env_vars_non_conda_sets_virtualenv_path(docroot):
@@ -597,7 +596,7 @@ def test_system_dependencies_installs_apt_packages(docroot):
     director.system_dependencies()
     # apt-get update, then install with a ``--`` guard before package names.
     calls = director.build_environment.run.call_args_list
-    assert calls[0].args[:2] == ("apt-get", "update")
+    assert calls[0].args[:2] == (binaries.APT_GET, "update")
     install_args = calls[1].args
     assert "--" in install_args
     assert install_args[install_args.index("--") + 1 :] == ("libfoo", "libbar")
@@ -850,7 +849,7 @@ def test_setup_vcs_creates_the_checkout_dir_via_the_environment(docroot):
     ):
         director.setup_vcs()
     mkdir_calls = [
-        c for c in director.vcs_environment.run.call_args_list if c.args[:1] == ("mkdir",)
+        c for c in director.vcs_environment.run.call_args_list if c.args[:1] == (binaries.MKDIR,)
     ]
     assert len(mkdir_calls) == 1
     assert director.data.project.doc_path in mkdir_calls[0].args
@@ -976,8 +975,8 @@ def test_install_build_tools_cache_hit_extracts_tarball(docroot):
     argvs = [c.args for c in calls]
     # The root-owned extracted tree is handed to the build user (as root)
     # before the docs-user ``mv`` can rename out of it.
-    chown_idx = next(i for i, a in enumerate(argvs) if a and a[0] == "chown")
-    mv_idx = next(i for i, a in enumerate(argvs) if a and a[0] == "mv")
+    chown_idx = next(i for i, a in enumerate(argvs) if a and a[0] == binaries.CHOWN)
+    mv_idx = next(i for i, a in enumerate(argvs) if a and a[0] == binaries.MV)
     assert calls[chown_idx].kwargs["user"] == "root"
     assert "--recursive" in calls[chown_idx].args
     assert chown_idx < mv_idx
@@ -1204,51 +1203,6 @@ def test_store_build_yaml_ignores_malformed_yaml(docroot):
     assert director.data.version.build_data is None
 
 
-def test_ssh_key_directory_is_created_by_the_build_user(docroot):
-    """
-    Through the environment, not from Python.
-
-    The runner and the build container are the same user in production but not
-    in dev, so a directory created here would be root-owned there — and the
-    checkout that follows writes into it as ``docs``.
-    """
-    director = make_director(
-        SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True
-    )
-    _run_creating_dirs(director)
-
-    director._write_ssh_key("PRIVATE-KEY-CONTENT")
-
-    mkdir = _calls_named(director, "mkdir")[0]
-    assert mkdir.args[-1].endswith("/checkouts")
-    # A swallowed failure here surfaces much later, as a checkout that can't
-    # create its working directory.
-    assert mkdir.kwargs["warn_only"] is False
-
-
-def test_ssh_key_is_chowned_to_the_build_user_by_id(docroot, monkeypatch):
-    """
-    By numeric id, because the name may not resolve here.
-
-    The dev compose service has no ``docs`` in its passwd db; a failed lookup
-    used to skip the chown silently, leaving ``ssh-add`` unable to read the key.
-    """
-    director = make_director(
-        SPHINX, project={"repo": "git@github.com:rtd/private.git"}, allow_private_repos=True
-    )
-    _run_creating_dirs(director)
-
-    monkeypatch.setattr("builder.director.pwd.getpwnam", mock.Mock(side_effect=KeyError))
-    monkeypatch.setattr("builder.settings.RTD_DOCKER_UID", 1005)
-    monkeypatch.setattr("builder.settings.RTD_DOCKER_GID", 205)
-    chowned = []
-    monkeypatch.setattr("builder.director.os.chown", lambda p, u, g: chowned.append((u, g)))
-
-    director._write_ssh_key("PRIVATE-KEY-CONTENT")
-
-    assert chowned == [(1005, 205)]
-
-
 # ---------------------------------------------------------------------------
 # Uploaded builds (direct artifact upload)
 #
@@ -1311,7 +1265,7 @@ def test_download_artifacts_from_storage(docroot):
     # The dir is created through the build environment so it's owned by the
     # build user rather than root.
     call = director.build_environment.run.call_args
-    assert call.args == ("mkdir", "-p", str(checkout))
+    assert call.args == (binaries.MKDIR, "-p", str(checkout))
     assert call.kwargs["record"] is False
 
 
@@ -1335,8 +1289,8 @@ def test_extract_artifacts_unzips_into_the_output_directory(docroot):
     argvs = [call.args for call in director.build_environment.run.call_args_list]
     # The commands are recorded and shown in the build UI, so they reference the
     # ``READTHEDOCS_*`` variables instead of the expanded paths.
-    mkdir = ("mkdir", "-p", "$READTHEDOCS_OUTPUT")
-    unzip = ("unzip", "$READTHEDOCS_REPOSITORY_PATH/artifacts.zip", "-d", "$READTHEDOCS_OUTPUT")
+    mkdir = (binaries.MKDIR, "-p", "$READTHEDOCS_OUTPUT")
+    unzip = (binaries.UNZIP, "$READTHEDOCS_REPOSITORY_PATH/artifacts.zip", "-d", "$READTHEDOCS_OUTPUT")
     assert argvs.index(mkdir) < argvs.index(unzip)
     # ``run`` raises ``BuildUserError(GENERIC)`` on a failed command unless the
     # caller opts out; without that the specific notification below would be

@@ -22,9 +22,11 @@ Ephemeral worker semantics:
   acknowledged at *completion*. If the worker / EC2 instance dies
   mid-build, the broker redelivers to another instance.
 - ``worker_prefetch_multiplier = 1`` — never reserve a second task while
-  one is in flight. With ``--max-tasks-per-child=1`` the worker exits
-  after the first task; this prevents an already-prefetched second
-  task from being abandoned.
+  one is in flight, so an in-flight build is the only thing this worker
+  holds when the instance terminates.
+- ``--max-tasks-per-child=1`` only recycles the pool child; the main
+  process keeps consuming. The ``task_received`` hook in ``worker.tasks``
+  is what stops it after the first build.
 """
 
 import os
@@ -87,7 +89,7 @@ app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
 #
 # Soft, not hard: the soft limit raises SoftTimeLimitExceeded *inside* the task,
 # so run_build stops the container, fails the Build, and lets task_postrun fire
-# — which is what self-terminates the instance. A hard limit SIGKILLs the child
+# — which is what releases the instance. A hard limit SIGKILLs the child
 # instead, so postrun never runs and the EC2 instance leaks. The hard limit is
 # kept 20% above as a backstop for a task that ignores the soft one.
 TASK_TIME_LIMIT = int(os.environ.get("RTD_BUILDS_TASK_TIME_LIMIT", "7200"))

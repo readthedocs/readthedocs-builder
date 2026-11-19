@@ -26,6 +26,7 @@ import os
 import structlog
 import yaml
 
+from builder import binaries
 from builder.config import PIP
 from builder.config import SETUPTOOLS
 from builder.config import ParseError
@@ -319,7 +320,7 @@ class Conda(PythonEnvironment):
     def _show_environment_yaml(self):
         """``cat`` the user's ``environment.yml`` into the build log."""
         self.build_env.run(
-            "cat",
+            binaries.CAT,
             self.config.conda.environment,
             cwd=self.checkout_path,
         )

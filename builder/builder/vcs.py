@@ -17,13 +17,16 @@ and the parsed ``submodules`` block); until that's ported, only the
 
 import os
 import re
+import time
 from typing import Iterable
 from urllib.parse import urlparse
 
 import structlog
 
+from builder import binaries
 from builder.constants import ALL
 from builder.constants import BRANCH
+from builder.constants import EXTERNAL
 from builder.constants import TAG
 from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
@@ -34,6 +37,11 @@ from builder.refspec import get_remote_fetch_refspec
 
 
 log = structlog.get_logger(__name__)
+
+# A new pull request's commit and ref can reach the provider a few seconds
+# after the webhook that triggered the build.
+FETCH_RETRY_DELAYS = (5, 10)
+MISSING_REF_ERRORS = ("couldn't find remote ref", "not our ref")
 
 
 class VCSVersion:
@@ -77,11 +85,11 @@ class Backend:
 
     def check_working_dir(self) -> None:
         if not os.path.exists(self.working_dir):
-            # Create the dir through the build environment so it's wrapped in
-            # ``runuser`` and owned by the build user.
+            # Create the dir through the build environment so it's created
+            # inside the container and owned by the build user.
             # ``cwd="/"`` is just a guaranteed-existing directory to spawn from (the path is absolute).
             self.environment.run(
-                "mkdir",
+                binaries.MKDIR,
                 "--parents",
                 self.working_dir,
                 cwd="/",
@@ -140,7 +148,7 @@ class Backend:
 
     def clone(self):
         """Shallow-clone the repository into the working directory."""
-        cmd = ["git", "clone", "--depth", "1", self.repo_url, "."]
+        cmd = [binaries.CONTAINER_GIT, "clone", "--depth", "1", self.repo_url, "."]
         try:
             return self.run(*cmd)
         except RepositoryError as exc:
@@ -153,8 +161,7 @@ class Backend:
         """
         Build the refspec for ``git fetch`` based on the version type.
 
-        Delegates to ``builder.refspec`` so the build and the worker's
-        bootstrap sparse-clone stay in agreement.
+        Delegates to ``builder.refspec``.
         """
         return get_remote_fetch_refspec(
             version_type=self.version.type,
@@ -169,7 +176,7 @@ class Backend:
     def fetch(self):
         """Fetch the relevant ref(s) into the working directory."""
         cmd = [
-            "git",
+            binaries.CONTAINER_GIT,
             "fetch",
             "origin",
             "--force",
@@ -198,6 +205,24 @@ class Backend:
                     version_identifier=self.version.identifier,
                 )
 
+        if self.version.type != EXTERNAL:
+            return self.run(*cmd)
+
+        attempts = len(FETCH_RETRY_DELAYS) + 1
+        for attempt, delay in enumerate(FETCH_RETRY_DELAYS, start=2):
+            code, stdout, stderr = self.run(*cmd, warn_only=True)
+            if code == 0:
+                return code, stdout, stderr
+            if not any(error in f"{stdout}{stderr or ''}" for error in MISSING_REF_ERRORS):
+                raise RepositoryError(message_id=RepositoryError.GENERIC)
+            log.info("Git fetch: ref not found yet, retrying.", delay=delay, attempt=attempt)
+            # Shown in the build output so the repeated fetch reads as a retry.
+            self.run(
+                binaries.ECHO,
+                f"Pull request not available yet, retrying git fetch in {delay} seconds "
+                f"(attempt {attempt} of {attempts})",
+            )
+            time.sleep(delay)
         return self.run(*cmd)
 
     def has_ssh_key_with_write_access(self) -> bool:
@@ -215,11 +240,11 @@ class Backend:
             ssh_url = f"git@{parsed.netloc}:{parsed.path.lstrip('/')}"
 
         try:
-            self.run("git", "remote", "add", remote_name, ssh_url, record=False)
+            self.run(binaries.CONTAINER_GIT, "remote", "add", remote_name, ssh_url, record=False)
             code, stdout, stderr = self.run(
-                "timeout",
+                binaries.TIMEOUT,
                 "10s",
-                "git",
+                binaries.CONTAINER_GIT,
                 "push",
                 "--dry-run",
                 remote_name,
@@ -276,7 +301,7 @@ class Backend:
             )
             return False
         finally:
-            self.run("git", "remote", "remove", remote_name, record=False)
+            self.run(binaries.CONTAINER_GIT, "remote", "remove", remote_name, record=False)
 
     # ---- Submodules ----
 
@@ -324,8 +349,8 @@ class Backend:
                 self.checkout_submodules(submodules, config.submodules.recursive)
 
     def checkout_submodules(self, submodules: list[str], recursive: bool):
-        self.run("git", "submodule", "sync")
-        cmd = ["git", "submodule", "update", "--init", "--force"]
+        self.run(binaries.CONTAINER_GIT, "submodule", "sync")
+        cmd = [binaries.CONTAINER_GIT, "submodule", "update", "--init", "--force"]
         if recursive:
             cmd.append("--recursive")
         cmd.append("--")
@@ -341,7 +366,7 @@ class Backend:
         survive parsing. Yields paths only; missing-path entries are skipped.
         """
         exit_code, stdout, _ = self.run(
-            "git",
+            binaries.CONTAINER_GIT,
             "config",
             "--null",
             "--file",
@@ -369,7 +394,7 @@ class Backend:
 
     def checkout_revision(self, revision):
         try:
-            return self.run("git", "checkout", "--force", revision)
+            return self.run(binaries.CONTAINER_GIT, "checkout", "--force", revision)
         except RepositoryError as exc:
             raise RepositoryError(
                 message_id=RepositoryError.FAILED_TO_CHECKOUT,
@@ -400,13 +425,13 @@ class Backend:
 
     def ref_exists(self, ref: str) -> bool:
         exit_code, _, _ = self.run(
-            "git", "show-ref", "--verify", "--quiet", "--", ref, record=False
+            binaries.CONTAINER_GIT, "show-ref", "--verify", "--quiet", "--", ref, record=False
         )
         return exit_code == 0
 
     @property
     def commit(self) -> str:
-        _, stdout, _ = self.run("git", "rev-parse", "HEAD", record=False)
+        _, stdout, _ = self.run(binaries.CONTAINER_GIT, "rev-parse", "HEAD", record=False)
         return stdout.strip()
 
     def contains_commit(self, commit: str) -> bool:
@@ -426,7 +451,7 @@ class Backend:
 
     def get_default_branch(self) -> str:
         """Resolve the remote's default branch via ``git symbolic-ref``."""
-        cmd = ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
+        cmd = [binaries.CONTAINER_GIT, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
         _, stdout, _ = self.run(*cmd, demux=True, record=False)
         return stdout.strip().removeprefix("origin/")
 
@@ -441,7 +466,7 @@ class Backend:
         if include_branches:
             extra_args.append("--heads")
 
-        cmd = ["git", "ls-remote", *extra_args, self.repo_url]
+        cmd = [binaries.CONTAINER_GIT, "ls-remote", *extra_args, self.repo_url]
 
         self.check_working_dir()
         exit_code, stdout, _ = self.run(*cmd, demux=True, record=False)
