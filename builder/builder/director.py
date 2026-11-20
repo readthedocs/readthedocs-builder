@@ -153,6 +153,27 @@ class BuildDirector:
         if commit:
             self.data.build["commit"] = commit
 
+        self.record_base_commit()
+
+    def record_base_commit(self):
+        """
+        Report the base commit once the PR has merged it in.
+
+        readthedocs.org refreshes the file tree diff's base snapshot from it.
+        Best effort: an API that doesn't send ``base_commit`` yet, or a failing
+        check, never fails the build.
+        """
+        base_commit = self.data.version.base_commit
+        if not self.data.version.is_external or not base_commit:
+            return
+        try:
+            if self.vcs_repository.contains_commit(base_commit):
+                self.data.build["base_commit"] = base_commit
+        except BuildCancelled:
+            raise
+        except Exception:
+            log.exception("Failed to check for the base commit.")
+
     def create_vcs_environment(self):
         """Build the VCS-time :class:`BuildEnvironment` (no config yet)."""
         self.vcs_environment = self.data.environment_class(
