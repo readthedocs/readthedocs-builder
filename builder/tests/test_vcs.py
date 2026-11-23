@@ -729,6 +729,11 @@ def test_ssh_probe_converts_an_https_repo_to_ssh_form(git_repo, docroot):
     assert add_remote[-1] == "git@github.com:readthedocs/test.git"
 
 
+def test_ssh_key_write_access_skipped_for_gitcode(git_repo, docroot):
+    repo = make_backend(git_repo, repo="git@gitcode.com:readthedocs/test.git")
+    assert _ssh_probe(repo, (0, "", "")) is False
+
+
 def test_ssh_key_write_access_unknown_error_is_false(git_repo, docroot):
     repo = make_backend(git_repo, repo="git@github.com:readthedocs/test.git")
     assert _ssh_probe(repo, (1, "", "some unexpected failure")) is False
