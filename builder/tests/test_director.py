@@ -109,11 +109,15 @@ def test_setup_ssh_agent_noop_when_private_repos_disabled(docroot):
     director.vcs_environment.run.assert_not_called()
 
 
-def test_setup_ssh_agent_noop_for_https_repo(docroot, monkeypatch):
-    director = make_director(SPHINX, project={"repo": "https://github.com/rtd/public"}, allow_private_repos=True)
+def test_setup_ssh_agent_runs_for_https_repo_with_key(docroot):
+    # HTTPS repos may still have SSH submodules/dependencies, so the agent
+    # starts whenever private repos are allowed and a key exists.
+    director = make_director(SPHINX, project={"repo": "https://github.com/rtd/private"}, allow_private_repos=True)
+    director.data.api_client.project.return_value.key.get.return_value = {"private_key": "PRIVATE-KEY-CONTENT"}
+    director.vcs_environment.run.return_value.output = _agent_output()
     director.setup_ssh_agent(director.vcs_environment)
-    assert director.ssh_agent_env == {}
-    director.vcs_environment.run.assert_not_called()
+    assert director.ssh_agent_env["SSH_AUTH_SOCK"] == "/tmp/ssh-xyz/agent.42"
+    assert _calls_named(director, binaries.CONTAINER_SSH_AGENT)
 
 
 def test_setup_ssh_agent_skips_when_project_has_no_key(docroot, monkeypatch):
