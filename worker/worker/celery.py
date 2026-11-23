@@ -96,5 +96,9 @@ TASK_TIME_LIMIT = int(os.environ.get("RTD_BUILDS_TASK_TIME_LIMIT", "7200"))
 app.conf.task_soft_time_limit = TASK_TIME_LIMIT
 app.conf.task_time_limit = int(TASK_TIME_LIMIT * 1.2)
 
+# Redis re-queues unacked tasks older than this, so a longer build gets
+# delivered to a second instance. Keep it above the hard limit and match web.
+app.conf.broker_transport_options = {"visibility_timeout": 18000}
+
 # Make sure ``worker.tasks`` is registered when the app starts.
 app.autodiscover_tasks(["worker"])
