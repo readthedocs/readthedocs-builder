@@ -239,6 +239,12 @@ class Backend:
             parsed = urlparse(ssh_url)
             ssh_url = f"git@{parsed.netloc}:{parsed.path.lstrip('/')}"
 
+        # GitCode accepts ``git push --dry-run`` with read-only keys,
+        # so the check below would always report write access.
+        host = ssh_url.split("@", 1)[-1].split(":", 1)[0].split("/", 1)[0]
+        if host.lower() == "gitcode.com":
+            return False
+
         try:
             self.run(binaries.CONTAINER_GIT, "remote", "add", remote_name, ssh_url, record=False)
             code, stdout, stderr = self.run(
