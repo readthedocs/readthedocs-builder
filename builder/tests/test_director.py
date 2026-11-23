@@ -980,8 +980,7 @@ def test_attach_notification_posts_to_the_api(docroot):
 # ---------------------------------------------------------------------------
 
 
-def test_checkout_ssh_key_write_access_is_a_hard_failure(docroot, monkeypatch):
-    monkeypatch.setattr("builder.settings.RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS", True)
+def test_checkout_ssh_key_write_access_is_a_hard_failure(docroot):
     director = make_director(SPHINX, allow_private_repos=True)
     _prime_checkout(director, docroot)
     director.vcs_repository.has_ssh_key_with_write_access.return_value = True
@@ -993,39 +992,18 @@ def test_checkout_ssh_key_write_access_is_a_hard_failure(docroot, monkeypatch):
     director.data.api_client.project(director.data.project.pk).patch.assert_called()
 
 
-def test_checkout_ssh_key_write_access_attaches_notification(docroot, monkeypatch):
-    monkeypatch.setattr("builder.settings.RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS", False)
+def test_checkout_ssh_key_without_write_access_succeeds(docroot):
     director = make_director(SPHINX, allow_private_repos=True)
     _prime_checkout(director, docroot)
-    director.vcs_repository.has_ssh_key_with_write_access.return_value = True
+    director.vcs_repository.has_ssh_key_with_write_access.return_value = False
 
-    with mock.patch.object(director, "attach_notification") as notify:
-        director.checkout()
-    notify.assert_called_once()
-
-
-def test_checkout_blocks_post_checkout_with_ssh_write_access(docroot, monkeypatch):
-    monkeypatch.setattr("builder.settings.RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS", False)
-    director = make_director(SPHINX, allow_private_repos=True)
-    _prime_checkout(
-        director,
-        docroot,
-        config_yaml=(
-            "version: 2\nbuild:\n  os: ubuntu-22.04\n  tools:\n    python: '3'\n"
-            "  jobs:\n    post_checkout:\n      - echo hi\nsphinx:\n  configuration: conf.py\n"
-        ),
-    )
-    director.vcs_repository.has_ssh_key_with_write_access.return_value = True
-
-    with mock.patch.object(director, "attach_notification"):
-        with pytest.raises(BuildUserError) as excinfo:
-            director.checkout()
-    # A post_checkout job + write access could push to the repo -> blocked.
-    assert excinfo.value.message_id == BuildUserError.SSH_KEY_WITH_WRITE_ACCESS
+    director.checkout()
+    director.vcs_repository.has_ssh_key_with_write_access.assert_called_once()
 
 
 def test_checkout_uses_a_custom_yaml_path(docroot):
     director = make_director(SPHINX, project={"readthedocs_yaml_path": "docs/custom.yaml"}, allow_private_repos=True)
+    director.vcs_repository.has_ssh_key_with_write_access.return_value = False
     checkout = director.data.project.checkout_path(director.data.version.slug)
     os.makedirs(os.path.join(checkout, "docs"), exist_ok=True)
     with open(os.path.join(checkout, "docs/custom.yaml"), "w") as fh:
