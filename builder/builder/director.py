@@ -9,7 +9,6 @@ builder. State that needs to flow between methods lives on a
 minus Celery.
 """
 
-import datetime
 import os
 from dataclasses import dataclass
 from dataclasses import field
@@ -30,7 +29,6 @@ from builder.config.find import find_one
 from builder.constants import BUILD_COMMANDS_OUTPUT_PATH_HTML
 from builder.constants import EXTERNAL
 from builder.constants import GENERIC
-from builder.constants import MESSAGE_PROJECT_SSH_KEY_WITH_WRITE_ACCESS
 from builder.environments import DockerBuildEnvironment
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildCancelled
@@ -270,31 +268,16 @@ class BuildDirector:
 
         # Business-only: enforce SSH-key-write-access policy. Only matters
         # when the runner is configured against a private-repo-capable
-        # instance; the brownouts have already passed (date >= 2025-12-01),
-        # so this is now a hard failure when the flag is set.
-        #
-        # TODO: remove the brownout check completely.
-        has_ssh_key_with_write_access = False
+        # instance. Building with an SSH key that has write access is a
+        # hard failure.
         if self.data.allow_private_repos:
             has_ssh_key_with_write_access = self.vcs_repository.has_ssh_key_with_write_access()
             if has_ssh_key_with_write_access != self.data.project.has_ssh_key_with_write_access:
                 self.data.api_client.project(self.data.project.pk).patch(
                     {"has_ssh_key_with_write_access": has_ssh_key_with_write_access}
                 )
-
-            now = datetime.datetime.now(tz=datetime.timezone.utc)
-            hard_failure = now >= datetime.datetime(
-                2025, 12, 1, 0, 0, 0, tzinfo=datetime.timezone.utc
-            )
             if has_ssh_key_with_write_access:
-                if hard_failure and settings.RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS:
-                    raise BuildUserError(BuildUserError.SSH_KEY_WITH_WRITE_ACCESS)
-                else:
-                    self.attach_notification(
-                        attached_to=f"project/{self.data.project.pk}",
-                        message_id=MESSAGE_PROJECT_SSH_KEY_WITH_WRITE_ACCESS,
-                        dismissable=True,
-                    )
+                raise BuildUserError(BuildUserError.SSH_KEY_WITH_WRITE_ACCESS)
 
         # When building "latest" without an explicit default_branch, capture
         # the remote's HEAD branch so the API gets updated post-build.
@@ -348,13 +331,6 @@ class BuildDirector:
         self.data.build["readthedocs_yaml_path"] = custom_config_file
 
         self.vcs_repository.update_submodules(self.data.config)
-
-        # Block ``post_checkout`` jobs when the SSH key has write access —
-        # otherwise a malicious config could push back to the repo.
-        if has_ssh_key_with_write_access and get_dotted_attribute(
-            self.data.config, "build.jobs.post_checkout", None
-        ):
-            raise BuildUserError(BuildUserError.SSH_KEY_WITH_WRITE_ACCESS)
 
     # ----- System dependencies (build.apt_packages) -----
 
