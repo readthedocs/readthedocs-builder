@@ -18,6 +18,7 @@ from conftest import make_director
 from builder import binaries
 from builder.constants import GENERIC
 from builder.exceptions import BuildAppError
+from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
 from builder.exceptions import RepositoryError
 from builder.storage import StorageType
@@ -872,6 +873,75 @@ def test_setup_vcs_checks_out_and_records_commit(docroot):
     checkout.assert_called_once()
     run_job.assert_called_once_with("post_checkout")
     assert director.data.build["commit"] == "abc123"
+
+
+def _setup_vcs_with_mocked_checkout(director):
+    """Run ``setup_vcs`` with the clone stubbed and the mocked repo kept."""
+    with mock.patch.object(director, "checkout"), mock.patch.object(
+        director, "run_build_job"
+    ), mock.patch.object(
+        director.data.project, "vcs_repo", return_value=director.vcs_repository
+    ):
+        director.setup_vcs()
+
+
+def test_setup_vcs_records_the_base_commit_when_the_pr_merged_it_in(docroot):
+    director = make_director(SPHINX, version={"type": "external", "base_commit": "base123"})
+    director.vcs_repository.contains_commit.return_value = True
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    director.vcs_repository.contains_commit.assert_called_once_with("base123")
+    assert director.data.build["base_commit"] == "base123"
+
+
+def test_setup_vcs_skips_the_base_commit_when_the_pr_did_not_merge_it_in(docroot):
+    director = make_director(SPHINX, version={"type": "external", "base_commit": "base123"})
+    director.vcs_repository.contains_commit.return_value = False
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    assert "base_commit" not in director.data.build
+
+
+def test_setup_vcs_skips_the_base_commit_check_when_the_api_does_not_send_one(docroot):
+    # An API deployed before this field exists: the payload has no ``base_commit``.
+    director = make_director(SPHINX, version={"type": "external"})
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    director.vcs_repository.contains_commit.assert_not_called()
+    assert "base_commit" not in director.data.build
+
+
+def test_setup_vcs_survives_a_failing_base_commit_check(docroot):
+    director = make_director(SPHINX, version={"type": "external", "base_commit": "base123"})
+    director.vcs_repository.contains_commit.side_effect = RuntimeError("boom")
+    director.vcs_repository.commit = "abc123"
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    assert director.data.build["commit"] == "abc123"
+    assert "base_commit" not in director.data.build
+
+
+def test_setup_vcs_does_not_swallow_a_cancellation_during_the_base_commit_check(docroot):
+    director = make_director(SPHINX, version={"type": "external", "base_commit": "base123"})
+    director.vcs_repository.contains_commit.side_effect = BuildCancelled(
+        BuildCancelled.CANCELLED_BY_USER
+    )
+
+    with pytest.raises(BuildCancelled):
+        _setup_vcs_with_mocked_checkout(director)
+
+
+def test_setup_vcs_skips_the_base_commit_check_for_internal_versions(docroot):
+    director = make_director(SPHINX, version={"type": "branch", "base_commit": "base123"})
+
+    _setup_vcs_with_mocked_checkout(director)
+
+    director.vcs_repository.contains_commit.assert_not_called()
+    assert "base_commit" not in director.data.build
 
 
 # ---------------------------------------------------------------------------

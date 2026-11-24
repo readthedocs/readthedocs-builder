@@ -439,6 +439,17 @@ class Backend:
         _, stdout, _ = self.run(binaries.CONTAINER_GIT, "rev-parse", "HEAD", record=False)
         return stdout.strip()
 
+    def contains_commit(self, commit: str) -> bool:
+        """
+        Whether ``commit`` is an ancestor of ``HEAD``.
+
+        A commit missing from the shallow clone is reported as not contained.
+        """
+        exit_code, _, _ = self.run(
+            binaries.CONTAINER_GIT, "merge-base", "--is-ancestor", commit, "HEAD", record=False
+        )
+        return exit_code == 0
+
     def get_default_branch(self) -> str:
         """Resolve the remote's default branch via ``git symbolic-ref``."""
         cmd = [binaries.CONTAINER_GIT, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
