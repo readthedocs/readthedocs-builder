@@ -13,13 +13,13 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from conftest import make_director
-
 from builder.constants import MESSAGE_BUILD_MEDIA_SIZE_EXCEEDED
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
+from builder.exceptions import SymlinkOutsideBasePath
 from builder.runner import Runner
+from conftest import make_director
 
 
 def _make_runner(config, *, project=None):
@@ -415,6 +415,65 @@ def test_validate_artifacts_rejects_empty_single_file_formats(docroot):
 
     assert excinfo.value.message_id == BuildUserError.BUILD_OUTPUT_HAS_0_FILES
     assert excinfo.value.format_values == {"artifact_type": "htmlzip"}
+
+
+def test_validate_artifacts_rejects_an_output_directory_symlinked_outside_the_docroot(
+    docroot, tmp_path
+):
+    # ``_validate_artifacts`` runs on the host and ``rclone`` follows a symlink
+    # given as its source path, so ``_readthedocs/json -> /home/docs`` would
+    # upload host files. ``json`` has no index.html requirement and allows
+    # multiple files, which makes it the easiest target.
+    runner = Runner(make_director().data)
+    _valid_html(runner)
+    outside = tmp_path / "outside-docroot"
+    outside.mkdir()
+    (outside / "secret.json").write_text("{}")
+    json_path = Path(
+        runner.data.project.artifact_path(version=runner.data.version.slug, type_="json")
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SymlinkOutsideBasePath) as excinfo:
+        runner._validate_artifacts()
+
+    assert excinfo.value.message_id == SymlinkOutsideBasePath.SYMLINK_USED
+
+
+def test_validate_artifacts_rejects_an_intermediate_symlink_outside_the_docroot(docroot, tmp_path):
+    # ``_readthedocs`` itself pointing outside is caught too: the whole path is
+    # resolved, not just the last component.
+    runner = Runner(make_director().data)
+    outside = tmp_path / "outside-docroot"
+    (outside / "html").mkdir(parents=True)
+    (outside / "html" / "index.html").write_text("<html></html>")
+    readthedocs_dir = Path(
+        runner.data.project.artifact_path(version=runner.data.version.slug, type_="html")
+    ).parent
+    readthedocs_dir.parent.mkdir(parents=True, exist_ok=True)
+    readthedocs_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SymlinkOutsideBasePath):
+        runner._validate_artifacts()
+
+
+def test_validate_artifacts_accepts_an_output_directory_symlinked_inside_the_docroot(
+    docroot,
+):
+    # Symlinks that stay inside the docroot are the user's business (e.g. a
+    # doctool that writes elsewhere in the checkout and links the output dir).
+    runner = Runner(make_director().data)
+    _valid_html(runner)
+    real_json = Path(runner.data.project.checkout_path(runner.data.version.slug)) / "build-json"
+    real_json.mkdir(parents=True)
+    (real_json / "search.json").write_text("{}")
+    json_path = Path(
+        runner.data.project.artifact_path(version=runner.data.version.slug, type_="json")
+    )
+    json_path.symlink_to(real_json, target_is_directory=True)
+
+    assert runner._validate_artifacts() == ["html", "json"]
 
 
 def test_validate_artifacts_rejects_an_output_path_that_is_a_file(docroot):

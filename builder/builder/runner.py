@@ -41,6 +41,7 @@ from builder.director import BuildDirector
 from builder.exceptions import BuildAppError
 from builder.exceptions import BuildCancelled
 from builder.exceptions import BuildUserError
+from builder.exceptions import SymlinkOutsideBasePath
 from builder.filesystem import assert_path_is_inside_docroot
 
 
@@ -408,6 +409,17 @@ class Runner:
 
             if not os.path.exists(artifact_directory):
                 continue
+
+            # SECURITY: this runs on the *host*, and ``exists``/``isdir`` follow
+            # symlinks. ``rclone`` skips symlinks it meets while listing, but it
+            # follows one given as the *source* path — so a build that does
+            # ``ln -s /home/docs _readthedocs/json`` would upload host files.
+            # Refuse any output directory that doesn't resolve inside the
+            # docroot (GHSA-368m-86q9-m99w).
+            try:
+                assert_path_is_inside_docroot(artifact_directory)
+            except PermissionError:
+                raise SymlinkOutsideBasePath(SymlinkOutsideBasePath.SYMLINK_USED)
 
             if not os.path.isdir(artifact_directory):
                 log.debug("Output path is not a directory.", output_format=artifact_type)
