@@ -74,6 +74,8 @@ class TaskData:
     # Replaces the clone container with one for ``build.os`` and returns its
     # name. The worker owns the container lifecycle, so it hands us this.
     start_build_container: Callable[[str], str] | None = None
+    # ``time.monotonic()`` at which the build container stops itself.
+    deadline: float | None = None
     # The worker's Docker client, shared so a build opens one connection.
     docker_client: Any = None
     build_director: "BuildDirector | None" = None

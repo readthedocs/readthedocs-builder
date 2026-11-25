@@ -69,7 +69,7 @@ def container(client, docroot):
     """A real build container, torn down afterwards."""
     build_pk = uuid.uuid4().int % 100000
     name = worker_docker.start_container(
-        client, build_pk=build_pk, build_os=BUILD_OS, memory="512m"
+        client, build_pk=build_pk, build_os=BUILD_OS, memory="512m", time_limit=300
     )
     try:
         yield name
@@ -261,6 +261,23 @@ def test_healthcheck_does_not_block_other_commands(client, container, build_env)
     assert run(build_env, "echo", "still-responsive").output.strip() == "still-responsive"
 
 
+def test_a_command_running_at_the_time_limit_keeps_its_output(client, docroot):
+    build_pk = uuid.uuid4().int % 100000
+    start = time.monotonic()
+    name = worker_docker.start_container(
+        client, build_pk=build_pk, build_os=BUILD_OS, memory="512m", time_limit=3
+    )
+    build_env = DockerBuildEnvironment(record=False, container_name=name, docker_client=client)
+    try:
+        cmd = run(build_env, "sh", "-c", "echo Resolving dependencies; sleep 1000")
+    finally:
+        worker_docker.stop_container(client, build_pk)
+
+    assert 3 <= time.monotonic() - start < 10
+    assert cmd.output.startswith("Resolving dependencies\n")
+    assert "Command killed due to timeout" in cmd.output
+
+
 # ---------------------------------------------------------------------------
 # Container lifecycle
 # ---------------------------------------------------------------------------
@@ -268,7 +285,9 @@ def test_healthcheck_does_not_block_other_commands(client, container, build_env)
 
 def test_stop_container_removes_it(client, docroot):
     build_pk = uuid.uuid4().int % 100000
-    worker_docker.start_container(client, build_pk=build_pk, build_os=BUILD_OS, memory="512m")
+    worker_docker.start_container(
+        client, build_pk=build_pk, build_os=BUILD_OS, memory="512m", time_limit=300
+    )
 
     worker_docker.stop_container(client, build_pk)
 
@@ -278,11 +297,13 @@ def test_stop_container_removes_it(client, docroot):
 
 def test_start_container_replaces_a_stale_one_of_the_same_name(client, docroot):
     build_pk = uuid.uuid4().int % 100000
-    worker_docker.start_container(client, build_pk=build_pk, build_os=BUILD_OS, memory="512m")
+    worker_docker.start_container(
+        client, build_pk=build_pk, build_os=BUILD_OS, memory="512m", time_limit=300
+    )
 
     try:
         worker_docker.start_container(
-            client, build_pk=build_pk, build_os=BUILD_OS, memory="512m"
+            client, build_pk=build_pk, build_os=BUILD_OS, memory="512m", time_limit=300
         )
     finally:
         worker_docker.stop_container(client, build_pk)

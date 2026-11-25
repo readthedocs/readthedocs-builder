@@ -102,12 +102,14 @@ def start_healthcheck(client, container, *, url, host_header, delay):
     log.info("Healthcheck started.", container=container, url=url, delay=delay)
 
 
-def start_container(client, *, build_pk, build_os, memory):
+def start_container(client, *, build_pk, build_os, memory, time_limit):
     """
     Start the build container detached and return its name.
 
-    The container runs ``sleep infinity`` as its only process — all real work
-    arrives later as ``docker exec`` from the runner. It runs as the image's
+    The container runs ``sleep`` as its only process — all real work
+    arrives later as ``docker exec`` from the runner. The sleep ends at the
+    build's time limit, which stops the container and the command running in
+    it, keeping that command's output. It runs as the image's
     default user (``docs``); privileged steps get ``user="root"`` per exec,
     which is what removed the need to run the whole container as root.
 
@@ -124,7 +126,7 @@ def start_container(client, *, build_pk, build_os, memory):
         name=name,
         # ``exec`` so the sleep is PID 1 and receives ``docker kill``'s signal
         # directly rather than through a shell that would ignore it.
-        entrypoint=["/bin/sh", "-c", f"exec {binaries.SLEEP} infinity"],
+        entrypoint=["/bin/sh", "-c", f"exec {binaries.SLEEP} {time_limit}"],
         detach=True,
         host_config=client.create_host_config(
             mem_limit=memory,
